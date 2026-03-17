@@ -2,14 +2,13 @@
 
 ## Apercu du projet
 
-Serveur MCP en Rust pour acceder aux emails via IMAP. Deux modes :
-- **stdio** : usage local, un seul utilisateur, auth configuree au demarrage
-- **HTTP** : multi-utilisateur, OAuth 2.1 + PKCE, sessions isolees
+Serveur MCP en Rust pour acceder aux emails via IMAP. Multi-utilisateur,
+OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 
 ## Stack technique
 
 - **Rust 2021**, async avec **Tokio**
-- **rmcp** v1.2 — SDK MCP (server, stdio, streamable HTTP)
+- **rmcp** v1.2 — SDK MCP (server, streamable HTTP)
 - **axum** v0.8 — serveur HTTP
 - **imap** v2 — client IMAP (sync, utilise via `spawn_blocking`)
 - **rusqlite** v0.34 (bundled) — stockage OAuth2
@@ -22,8 +21,7 @@ src/
 ├── main.rs             # Point d'entree + AuthMcpService (middleware Tower)
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
 ├── server.rs           # ExchangeMcpServer + 10 outils MCP
-├── auth.rs             # Trait AuthProvider, BasicAuthProvider, ImapCredentials
-├── oauth.rs            # OAuthManager — Device Code Flow Microsoft 365
+├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── oauth2_server.rs    # Serveur OAuth 2.1 (metadata, register, authorize, token)
 ├── oauth2_store.rs     # SQLite store (clients, auth codes, tokens)
 ├── imap_client.rs      # ImapClient — toutes les operations IMAP
@@ -31,7 +29,7 @@ src/
 └── login.rs            # extract_bearer_token() + favicon handler
 ```
 
-## Flux de donnees (mode HTTP)
+## Flux de donnees
 
 ```
 Client MCP
@@ -56,6 +54,7 @@ Client MCP
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
 - **Tokens** : generes via `base64(random_bytes)` URL-safe sans padding
 - **Sessions** : UUID v4 comme cle, stockees dans un `RwLock<HashMap>`
+- **Auth** : uniquement login/password IMAP (pas d'OAuth2 Microsoft cote IMAP)
 
 ## Points d'attention
 
@@ -68,9 +67,10 @@ Client MCP
 ## Variables d'environnement
 
 Voir la section complete dans le README.md. Les plus importantes :
-- `EXCHANGE_AUTH_METHOD` — `oauth2` ou `basic`
-- `EXCHANGE_MCP_TRANSPORT` — `stdio` ou `http`
-- `EXCHANGE_MCP_ISSUER` — URL publique du serveur (pour le mode HTTP derriere un proxy)
+
+- `EXCHANGE_IMAP_HOST` / `EXCHANGE_IMAP_PORT` — serveur IMAP cible
+- `EXCHANGE_MCP_SSE_HOST` / `EXCHANGE_MCP_SSE_PORT` — adresse d'ecoute HTTP
+- `EXCHANGE_MCP_ISSUER` — URL publique du serveur (derriere un proxy)
 - `EXCHANGE_MCP_OAUTH_DB` — chemin de la base SQLite OAuth2
 - `RUST_LOG` — niveau de log
 
@@ -80,11 +80,8 @@ Voir la section complete dans le README.md. Les plus importantes :
 # Build
 cargo build --release
 
-# Lancer en mode stdio
-cargo run
-
-# Lancer en mode HTTP
-EXCHANGE_MCP_TRANSPORT=http EXCHANGE_MCP_SSE_HOST=0.0.0.0 cargo run
+# Lancer
+EXCHANGE_MCP_SSE_HOST=0.0.0.0 cargo run
 
 # Logs debug
 RUST_LOG=debug cargo run
@@ -94,5 +91,6 @@ RUST_LOG=debug cargo run
 
 - **Garder la documentation a jour** : toute modification d'un outil MCP, d'une variable d'environnement, d'un endpoint OAuth, ou de l'architecture doit etre refletee dans le README.md et ce fichier CLAUDE.md.
 - **Pas d'accents dans le code source** (eviter les problemes d'encodage dans les string literals HTML). Les accents sont OK dans le README et CLAUDE.md.
-- **Ne pas ajouter de endpoint legacy** (token en query param, page de login directe) — toute l'auth HTTP passe par OAuth 2.1.
+- **Pas de mode stdio** — le serveur fonctionne uniquement en HTTP multi-utilisateur.
+- **Pas d'auth OAuth2 Microsoft cote IMAP** — l'auth IMAP est toujours login/password. L'OAuth 2.1 sert uniquement a authentifier les clients MCP.
 - **Tester la compilation** (`cargo build`) avant de commit.

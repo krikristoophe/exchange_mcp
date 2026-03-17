@@ -10,23 +10,6 @@ pub struct ImapClient {
     port: u16,
 }
 
-/// XOAUTH2 authenticator for the imap crate
-struct XOAuth2Auth {
-    user: String,
-    access_token: String,
-}
-
-impl imap::Authenticator for XOAuth2Auth {
-    type Response = String;
-
-    fn process(&self, _challenge: &[u8]) -> Self::Response {
-        format!(
-            "user={}\x01auth=Bearer {}\x01\x01",
-            self.user, self.access_token
-        )
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FolderInfo {
     pub name: String,
@@ -88,24 +71,10 @@ impl ImapClient {
         let client = imap::connect((host, port), host, &tls)
             .context("Failed to connect to IMAP server")?;
 
-        match credentials {
-            ImapCredentials::OAuth2 { email, access_token } => {
-                let auth = XOAuth2Auth {
-                    user: email,
-                    access_token,
-                };
-                client
-                    .authenticate("XOAUTH2", &auth)
-                    .map_err(|(e, _)| e)
-                    .context("XOAUTH2 authentication failed")
-            }
-            ImapCredentials::Basic { username, password } => {
-                client
-                    .login(&username, &password)
-                    .map_err(|(e, _)| e)
-                    .context("IMAP login failed")
-            }
-        }
+        client
+            .login(&credentials.username, &credentials.password)
+            .map_err(|(e, _)| e)
+            .context("IMAP login failed")
     }
 
     /// List all mailbox folders

@@ -1,17 +1,6 @@
 {
-  "auth_method": "oauth2",
-
-  "tenant_id": "YOUR_AZURE_TENANT_ID",
-  "client_id": "YOUR_AZURE_CLIENT_ID",
-  "client_secret": null,
-
-  "email": "your.email@company.com",
   "imap_host": "outlook.office365.com",
   "imap_port": 993,
-  "smtp_host": "smtp.office365.com",
-  "smtp_port": 587,
-
-  "transport": "stdio",
   "sse_host": "0.0.0.0",
   "sse_port": 3000
 }

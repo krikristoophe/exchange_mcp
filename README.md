@@ -1,19 +1,13 @@
 # Exchange MCP Server
 
-Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Supporte Microsoft Exchange (OAuth2 Device Code Flow) et tout serveur IMAP standard (login/password).
-
-Deux modes de deploiement :
-- **stdio** — usage local avec Claude Code CLI / Desktop
-- **HTTP** — usage distant multi-utilisateur avec OAuth 2.1 + PKCE (compatible Claude Web)
+Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploiement multi-utilisateur avec OAuth 2.1 + PKCE, compatible Claude Web et tout client MCP.
 
 ## Fonctionnalites
 
-- Authentification OAuth2 (Microsoft 365) ou basique (login/password)
 - OAuth 2.1 Authorization Server integre (PKCE, Dynamic Client Registration)
-- Transport dual : stdio ou Streamable HTTP
-- Token caching avec refresh automatique
-- Multi-utilisateur en mode HTTP (sessions isolees)
+- Multi-utilisateur avec sessions IMAP isolees
 - Conversion HTML → texte, decodage MIME/RFC 2047, detection des pieces jointes
+- Compatible avec tout serveur IMAP (Exchange, Gmail, Dovecot, etc.)
 
 ### Outils MCP
 
@@ -36,12 +30,6 @@ Deux modes de deploiement :
 cargo build --release
 ```
 
-Ou installation directe :
-
-```bash
-cargo install --path .
-```
-
 ## Configuration
 
 La configuration se charge depuis un fichier JSON ou des variables d'environnement. Les variables d'environnement ont priorite sur le fichier.
@@ -50,47 +38,40 @@ La configuration se charge depuis un fichier JSON ou des variables d'environneme
 
 Emplacement par defaut : `~/.config/exchange-mcp/config.json`
 
-Override avec : `EXCHANGE_MCP_CONFIG=/chemin/vers/config.json`
+```json
+{
+  "imap_host": "outlook.office365.com",
+  "imap_port": 993,
+  "sse_host": "0.0.0.0",
+  "sse_port": 3000
+}
+```
+
+Override du chemin : `EXCHANGE_MCP_CONFIG=/chemin/vers/config.json`
 
 ### Variables d'environnement
 
-#### Authentification
-
-| Variable | Description | Defaut |
-|----------|-------------|--------|
-| `EXCHANGE_AUTH_METHOD` | Methode d'auth : `oauth2` ou `basic` | `oauth2` |
-| `EXCHANGE_TENANT_ID` | Azure AD Tenant ID (requis si oauth2) | — |
-| `EXCHANGE_CLIENT_ID` | Azure App Client ID (requis si oauth2) | — |
-| `EXCHANGE_CLIENT_SECRET` | Client secret (optionnel, apps confidentielles) | — |
-| `EXCHANGE_USERNAME` | Nom d'utilisateur IMAP (requis si basic) | — |
-| `EXCHANGE_PASSWORD` | Mot de passe IMAP (requis si basic) | — |
-| `EXCHANGE_EMAIL` | Adresse email de l'utilisateur | — |
-
-#### Serveur IMAP/SMTP
+#### Serveur IMAP
 
 | Variable | Description | Defaut |
 |----------|-------------|--------|
 | `EXCHANGE_IMAP_HOST` | Serveur IMAP | `outlook.office365.com` |
 | `EXCHANGE_IMAP_PORT` | Port IMAP | `993` |
-| `EXCHANGE_SMTP_HOST` | Serveur SMTP | `smtp.office365.com` |
-| `EXCHANGE_SMTP_PORT` | Port SMTP | `587` |
 
-#### Transport et serveur HTTP
+#### Serveur HTTP
 
 | Variable | Description | Defaut |
 |----------|-------------|--------|
-| `EXCHANGE_MCP_TRANSPORT` | Mode de transport : `stdio` ou `http` | `stdio` |
-| `EXCHANGE_MCP_SSE_HOST` | Adresse d'ecoute HTTP | `127.0.0.1` |
-| `EXCHANGE_MCP_SSE_PORT` | Port HTTP | `3000` |
-| `EXCHANGE_MCP_ISSUER` | URL publique du serveur OAuth 2.1 | `http://<host>:<port>` |
+| `EXCHANGE_MCP_SSE_HOST` | Adresse d'ecoute | `127.0.0.1` |
+| `EXCHANGE_MCP_SSE_PORT` | Port | `3000` |
+| `EXCHANGE_MCP_ISSUER` | URL publique du serveur OAuth 2.1 (derriere un proxy) | `http://<host>:<port>` |
 
 #### Chemins de fichiers
 
 | Variable | Description | Defaut |
 |----------|-------------|--------|
 | `EXCHANGE_MCP_CONFIG` | Fichier de configuration | `~/.config/exchange-mcp/config.json` |
-| `EXCHANGE_MCP_TOKEN_CACHE` | Cache de tokens OAuth2 Microsoft | `~/.cache/exchange-mcp/token_cache.json` |
-| `EXCHANGE_MCP_OAUTH_DB` | Base SQLite OAuth 2.1 (mode HTTP) | `~/.local/share/exchange-mcp/oauth2.db` |
+| `EXCHANGE_MCP_OAUTH_DB` | Base SQLite OAuth 2.1 | `~/.local/share/exchange-mcp/oauth2.db` |
 
 #### Logging
 
@@ -98,83 +79,26 @@ Override avec : `EXCHANGE_MCP_CONFIG=/chemin/vers/config.json`
 |----------|-------------|--------|
 | `RUST_LOG` | Niveau de log (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
 
-## Usage
-
-### Mode stdio — Claude Code CLI / Desktop
-
-Configuration MCP client :
-
-```json
-{
-  "mcpServers": {
-    "exchange": {
-      "command": "exchange-mcp",
-      "env": {
-        "EXCHANGE_TENANT_ID": "votre-tenant-id",
-        "EXCHANGE_CLIENT_ID": "votre-client-id",
-        "EXCHANGE_EMAIL": "vous@entreprise.com"
-      }
-    }
-  }
-}
-```
-
-Pour un serveur IMAP standard (non Microsoft) :
-
-```json
-{
-  "mcpServers": {
-    "exchange": {
-      "command": "exchange-mcp",
-      "env": {
-        "EXCHANGE_AUTH_METHOD": "basic",
-        "EXCHANGE_USERNAME": "vous@exemple.com",
-        "EXCHANGE_PASSWORD": "motdepasse",
-        "EXCHANGE_EMAIL": "vous@exemple.com",
-        "EXCHANGE_IMAP_HOST": "imap.exemple.com",
-        "EXCHANGE_IMAP_PORT": "993"
-      }
-    }
-  }
-}
-```
-
-#### Premiere connexion OAuth2
-
-Au premier lancement en mode OAuth2, le serveur affiche un lien d'authentification Microsoft sur stderr :
-
-```
-========================================
-  Microsoft Exchange Authentication
-========================================
-Open this URL in your browser:
-  https://microsoft.com/devicelogin
-Enter code: ABCD1234
-========================================
-```
-
-Le token est ensuite cache dans `~/.cache/exchange-mcp/token_cache.json` et rafraichi automatiquement.
-
-### Mode HTTP — Claude Web / multi-utilisateur
-
-Lancer le serveur :
+## Lancement
 
 ```bash
-EXCHANGE_MCP_TRANSPORT=http \
 EXCHANGE_MCP_SSE_HOST=0.0.0.0 \
 EXCHANGE_MCP_SSE_PORT=3000 \
 exchange-mcp
 ```
 
 Le serveur expose :
-- `GET /.well-known/oauth-protected-resource` — Metadonnees de la ressource protegee (RFC 9728)
-- `GET /.well-known/oauth-authorization-server` — Metadonnees du serveur d'autorisation (RFC 8414)
-- `POST /oauth/register` — Enregistrement dynamique de client (RFC 7591)
-- `GET|POST /oauth/authorize` — Endpoint d'autorisation (formulaire de login IMAP)
-- `POST /oauth/token` — Endpoint de token (echange de code + refresh)
-- `/mcp` — Endpoint MCP (necessite `Authorization: Bearer <token>`)
 
-#### Flow OAuth 2.1 complet
+| Endpoint | Description |
+|----------|-------------|
+| `GET /.well-known/oauth-protected-resource` | Metadonnees ressource protegee (RFC 9728) |
+| `GET /.well-known/oauth-authorization-server` | Metadonnees serveur d'autorisation (RFC 8414) |
+| `POST /oauth/register` | Enregistrement dynamique de client (RFC 7591) |
+| `GET\|POST /oauth/authorize` | Endpoint d'autorisation (formulaire de login IMAP) |
+| `POST /oauth/token` | Endpoint de token (echange de code + refresh) |
+| `/mcp` | Endpoint MCP (`Authorization: Bearer <token>` requis) |
+
+## Flow OAuth 2.1
 
 1. Le client MCP envoie une requete a `/mcp` sans token
 2. Le serveur repond **401** avec `WWW-Authenticate: Bearer resource_metadata="..."`
@@ -188,30 +112,11 @@ Le serveur expose :
 10. Le client echange le code + `code_verifier` contre un `access_token` via `POST /oauth/token`
 11. Le client utilise `Authorization: Bearer <access_token>` sur `/mcp`
 
-#### Deploiement avec URL publique
-
-Si le serveur est derriere un reverse proxy, configurer l'URL publique :
+### Deploiement derriere un reverse proxy
 
 ```bash
 EXCHANGE_MCP_ISSUER=https://mcp.exemple.com exchange-mcp
 ```
-
-Cela permet aux metadonnees OAuth de retourner les bonnes URLs.
-
-## Azure App Registration (OAuth2)
-
-Pour l'authentification Microsoft 365 (mode stdio avec Device Code Flow) :
-
-1. Aller sur [Azure Portal](https://portal.azure.com) → Microsoft Entra ID → App registrations
-2. Creer une nouvelle application :
-   - **Name** : Exchange MCP
-   - **Supported account types** : Single tenant
-   - **Redirect URI** : laisser vide
-3. Dans **API permissions**, ajouter :
-   - `https://outlook.office365.com/IMAP.AccessAsUser.All` (Delegated)
-   - `https://outlook.office365.com/SMTP.Send` (Delegated)
-4. Dans **Authentication** → **Allow public client flows** : **Yes**
-5. Noter le **Application (client) ID** et le **Directory (tenant) ID**
 
 ## Outils MCP — Details
 
@@ -227,9 +132,10 @@ Lister tous les dossiers de la boite mail.
 
 Lister les emails recents d'un dossier.
 
-**Parametres :**
-- `folder` (string, requis) — nom du dossier (ex: `"INBOX"`, `"Sent Items"`)
-- `limit` (entier, optionnel) — nombre max d'emails. Defaut: 20
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `folder` | string | oui | — | Nom du dossier (ex: `"INBOX"`, `"Sent Items"`) |
+| `limit` | entier | non | 20 | Nombre max d'emails |
 
 **Retour :** liste de `{ uid, subject, from, date, flags, size }`
 
@@ -237,9 +143,10 @@ Lister les emails recents d'un dossier.
 
 Lire le contenu complet d'un email.
 
-**Parametres :**
-- `folder` (string, requis) — dossier contenant l'email
-- `uid` (entier, requis) — UID de l'email
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier contenant l'email |
+| `uid` | entier | oui | UID de l'email |
 
 **Retour :** `{ uid, subject, from, to, cc, date, flags, body_text, body_html, attachments }`
 
@@ -247,54 +154,50 @@ Lire le contenu complet d'un email.
 
 Rechercher des emails avec la syntaxe IMAP.
 
-**Parametres :**
-- `folder` (string, requis) — dossier dans lequel chercher
-- `query` (string, requis) — requete IMAP (ex: `UNSEEN`, `FROM "user@ex.com"`, `SUBJECT "reunion"`, `SINCE 01-Jan-2025`)
-- `limit` (entier, optionnel) — nombre max de resultats. Defaut: 20
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `folder` | string | oui | — | Dossier dans lequel chercher |
+| `query` | string | oui | — | Requete IMAP (ex: `UNSEEN`, `FROM "user@ex.com"`, `SUBJECT "reunion"`) |
+| `limit` | entier | non | 20 | Nombre max de resultats |
 
 **Retour :** liste de `{ uid, subject, from, date, flags, size }`
 
 ### mark_as_read / mark_as_unread
 
-Marquer un email comme lu ou non lu.
-
-**Parametres :**
-- `folder` (string, requis)
-- `uid` (entier, requis)
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier |
+| `uid` | entier | oui | UID de l'email |
 
 ### move_email
 
-Deplacer un email vers un autre dossier.
-
-**Parametres :**
-- `folder` (string, requis) — dossier source
-- `uid` (entier, requis)
-- `target_folder` (string, requis) — dossier de destination
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier source |
+| `uid` | entier | oui | UID de l'email |
+| `target_folder` | string | oui | Dossier de destination |
 
 ### delete_email
 
-Supprimer un email (deplace vers Deleted Items).
-
-**Parametres :**
-- `folder` (string, requis)
-- `uid` (entier, requis)
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier |
+| `uid` | entier | oui | UID de l'email |
 
 ### set_flag
 
-Ajouter ou retirer un flag IMAP.
-
-**Parametres :**
-- `folder` (string, requis)
-- `uid` (entier, requis)
-- `flag` (string, requis) — flag IMAP (ex: `\Flagged`, `\Seen`, `\Answered`, `\Draft`)
-- `add` (bool, requis) — `true` pour ajouter, `false` pour retirer
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier |
+| `uid` | entier | oui | UID de l'email |
+| `flag` | string | oui | Flag IMAP (`\Flagged`, `\Seen`, `\Answered`, `\Draft`) |
+| `add` | bool | oui | `true` pour ajouter, `false` pour retirer |
 
 ### folder_status
 
-Obtenir les statistiques d'un dossier.
-
-**Parametres :**
-- `folder` (string, requis)
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Nom du dossier |
 
 **Retour :** `{ name, total, unseen, recent }`
 
@@ -302,12 +205,11 @@ Obtenir les statistiques d'un dossier.
 
 ```
 src/
-├── main.rs             # Point d'entree, initialisation des transports
+├── main.rs             # Point d'entree, AuthMcpService (middleware Tower)
 ├── config.rs           # Chargement configuration (fichier + env)
 ├── server.rs           # Definition des outils MCP
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
-├── oauth.rs            # OAuth2 Device Code Flow (Microsoft 365)
-├── oauth2_server.rs    # Serveur d'autorisation OAuth 2.1 (mode HTTP)
+├── oauth2_server.rs    # Serveur d'autorisation OAuth 2.1
 ├── oauth2_store.rs     # Store SQLite pour OAuth 2.1
 ├── imap_client.rs      # Operations IMAP et parsing email
 ├── session.rs          # Store de sessions multi-utilisateur

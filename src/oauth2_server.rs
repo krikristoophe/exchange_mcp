@@ -320,7 +320,6 @@ pub async fn authorize_post(
             let auth: Arc<dyn AuthProvider> = Arc::new(BasicAuthProvider::new(
                 email.clone(),
                 password,
-                email.clone(),
             ));
             let imap_client = Arc::new(ImapClient::new(auth, imap_host.clone(), imap_port));
             let session_token = uuid::Uuid::new_v4().to_string();

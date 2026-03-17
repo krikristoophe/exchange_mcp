@@ -2,7 +2,6 @@ mod auth;
 mod config;
 mod imap_client;
 mod login;
-mod oauth;
 mod oauth2_server;
 mod oauth2_store;
 mod server;
@@ -11,13 +10,8 @@ mod session;
 use std::sync::Arc;
 
 use anyhow::Result;
-use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
-use crate::auth::{AuthProvider, BasicAuthProvider};
-use crate::config::Config;
-use crate::imap_client::ImapClient;
-use crate::oauth::OAuthManager;
 use crate::oauth2_server::OAuth2State;
 use crate::oauth2_store::OAuth2Store;
 use crate::server::ExchangeMcpServer;
@@ -39,63 +33,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Exchange MCP Server");
 
-    let config = Config::load()?;
-
-    match config.transport.as_str() {
-        "http" => {
-            start_http_server(config).await?;
-        }
-        _ => {
-            // stdio mode requires auth to be configured upfront
-            let imap = create_imap_client(&config).await?;
-            let mcp_server = ExchangeMcpServer::new(imap);
-            start_stdio_server(mcp_server).await?;
-        }
-    }
-
-    Ok(())
+    let config = config::Config::load()?;
+    start_http_server(config).await
 }
 
-async fn create_imap_client(config: &Config) -> Result<Arc<ImapClient>> {
-    let auth_provider: Arc<dyn AuthProvider> = match config.auth_method.as_str() {
-        "basic" => {
-            let username = config.username.clone().unwrap_or_else(|| config.email.clone());
-            let password = config
-                .password
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("password is required for basic auth"))?;
-            tracing::info!("Using basic (login/password) authentication");
-            Arc::new(BasicAuthProvider::new(username, password, config.email.clone()))
-        }
-        _ => {
-            if config.client_id.is_empty() || config.tenant_id.is_empty() {
-                anyhow::bail!("client_id and tenant_id are required for OAuth2 auth");
-            }
-            let oauth = Arc::new(OAuthManager::new(config)?);
-            oauth.load_cached_token().await?;
-            tracing::info!("Using OAuth2 (Microsoft 365) authentication");
-            oauth
-        }
-    };
-
-    Ok(Arc::new(ImapClient::new(
-        auth_provider,
-        config.imap_host.clone(),
-        config.imap_port,
-    )))
-}
-
-async fn start_stdio_server(server: ExchangeMcpServer) -> Result<()> {
-    tracing::info!("Starting MCP server on stdio");
-
-    let transport = rmcp::transport::io::stdio();
-    let service = server.serve(transport).await?;
-    service.waiting().await?;
-
-    Ok(())
-}
-
-async fn start_http_server(config: Config) -> Result<()> {
+async fn start_http_server(config: config::Config) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService,
         session::local::LocalSessionManager,
@@ -103,7 +45,7 @@ async fn start_http_server(config: Config) -> Result<()> {
     };
 
     let addr = format!("{}:{}", config.sse_host, config.sse_port);
-    tracing::info!("Starting MCP Streamable HTTP server on {addr} (multi-user mode)");
+    tracing::info!("Starting MCP Streamable HTTP server on {addr}");
 
     let session_store = Arc::new(SessionStore::new());
 

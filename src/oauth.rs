@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::auth::{AuthProvider, ImapCredentials};
 use crate::config::Config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,5 +321,20 @@ impl OAuthManager {
                 anyhow::bail!("Unexpected token response ({status}): {body}");
             }
         }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for OAuthManager {
+    async fn get_credentials(&self) -> Result<ImapCredentials> {
+        let token = self.get_access_token().await?;
+        Ok(ImapCredentials::OAuth2 {
+            email: self.email.clone(),
+            access_token: token,
+        })
+    }
+
+    fn email(&self) -> &str {
+        &self.email
     }
 }

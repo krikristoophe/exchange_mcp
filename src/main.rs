@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod imap_client;
 mod oauth;
@@ -9,6 +10,7 @@ use anyhow::Result;
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
+use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::config::Config;
 use crate::imap_client::ImapClient;
 use crate::oauth::OAuthManager;
@@ -29,15 +31,30 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = Config::load()?;
 
-    // Initialize OAuth manager
-    let oauth = Arc::new(OAuthManager::new(&config)?);
-
-    // Load cached tokens
-    oauth.load_cached_token().await?;
+    // Initialize auth provider based on config
+    let auth_provider: Arc<dyn AuthProvider> = match config.auth_method.as_str() {
+        "basic" => {
+            let username = config.username.clone().unwrap_or_else(|| config.email.clone());
+            let password = config.password.clone()
+                .ok_or_else(|| anyhow::anyhow!("password is required for basic auth (set EXCHANGE_PASSWORD or add \"password\" to config)"))?;
+            tracing::info!("Using basic (login/password) authentication");
+            Arc::new(BasicAuthProvider::new(username, password, config.email.clone()))
+        }
+        _ => {
+            // OAuth2 mode
+            if config.client_id.is_empty() || config.tenant_id.is_empty() {
+                anyhow::bail!("client_id and tenant_id are required for OAuth2 auth (or use auth_method = \"basic\" for login/password)");
+            }
+            let oauth = Arc::new(OAuthManager::new(&config)?);
+            oauth.load_cached_token().await?;
+            tracing::info!("Using OAuth2 (Microsoft 365) authentication");
+            oauth
+        }
+    };
 
     // Create IMAP client
     let imap = Arc::new(ImapClient::new(
-        oauth.clone(),
+        auth_provider,
         config.imap_host.clone(),
         config.imap_port,
     ));

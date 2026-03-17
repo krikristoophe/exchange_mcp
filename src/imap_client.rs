@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use std::sync::Arc;
 
-use crate::oauth::OAuthManager;
+use crate::auth::{AuthProvider, ImapCredentials};
 
 pub struct ImapClient {
-    oauth: Arc<OAuthManager>,
+    auth: Arc<dyn AuthProvider>,
     host: String,
     port: u16,
 }
@@ -74,43 +74,48 @@ pub struct FolderStatus {
 }
 
 impl ImapClient {
-    pub fn new(oauth: Arc<OAuthManager>, host: String, port: u16) -> Self {
-        Self { oauth, host, port }
+    pub fn new(auth: Arc<dyn AuthProvider>, host: String, port: u16) -> Self {
+        Self { auth, host, port }
     }
 
     /// Connect and authenticate to IMAP (blocking, call via spawn_blocking)
     fn connect_sync(
         host: &str,
         port: u16,
-        email: &str,
-        access_token: &str,
+        credentials: ImapCredentials,
     ) -> Result<imap::Session<native_tls::TlsStream<std::net::TcpStream>>> {
         let tls = native_tls::TlsConnector::new()?;
         let client = imap::connect((host, port), host, &tls)
             .context("Failed to connect to IMAP server")?;
 
-        let auth = XOAuth2Auth {
-            user: email.to_string(),
-            access_token: access_token.to_string(),
-        };
-
-        let session = client
-            .authenticate("XOAUTH2", &auth)
-            .map_err(|(e, _)| e)
-            .context("XOAUTH2 authentication failed")?;
-
-        Ok(session)
+        match credentials {
+            ImapCredentials::OAuth2 { email, access_token } => {
+                let auth = XOAuth2Auth {
+                    user: email,
+                    access_token,
+                };
+                client
+                    .authenticate("XOAUTH2", &auth)
+                    .map_err(|(e, _)| e)
+                    .context("XOAUTH2 authentication failed")
+            }
+            ImapCredentials::Basic { username, password } => {
+                client
+                    .login(&username, &password)
+                    .map_err(|(e, _)| e)
+                    .context("IMAP login failed")
+            }
+        }
     }
 
     /// List all mailbox folders
     pub async fn list_folders(&self) -> Result<Vec<FolderInfo>> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             let mailboxes = session.list(Some(""), Some("*"))?;
 
             let folders: Vec<FolderInfo> = mailboxes
@@ -134,14 +139,13 @@ impl ImapClient {
         folder: &str,
         limit: Option<u32>,
     ) -> Result<Vec<EmailSummary>> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             let mailbox = session.select(&folder)?;
 
             let limit = limit.unwrap_or(20);
@@ -170,14 +174,13 @@ impl ImapClient {
 
     /// Read a specific email by UID
     pub async fn read_email(&self, folder: &str, uid: u32) -> Result<EmailDetail> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
             let messages = session.uid_fetch(uid.to_string(), "(UID FLAGS ENVELOPE BODY[])")?;
@@ -198,15 +201,14 @@ impl ImapClient {
         query: &str,
         limit: Option<u32>,
     ) -> Result<Vec<EmailSummary>> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
         let query = query.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
             let uids = session.uid_search(&query)?;
@@ -244,14 +246,13 @@ impl ImapClient {
 
     /// Get folder status (total, unseen, recent)
     pub async fn get_folder_status(&self, folder: &str) -> Result<FolderStatus> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             let mailbox = session.examine(&folder)?;
 
             let unseen = session
@@ -284,15 +285,14 @@ impl ImapClient {
 
     /// Move an email to another folder
     pub async fn move_email(&self, folder: &str, uid: u32, target_folder: &str) -> Result<()> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
         let target_folder = target_folder.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
             session.uid_copy(uid.to_string(), &target_folder)?;
@@ -318,15 +318,14 @@ impl ImapClient {
     }
 
     async fn store_flag(&self, folder: &str, uid: u32, flag_cmd: &str) -> Result<()> {
-        let access_token = self.oauth.get_access_token().await?;
+        let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let email = self.oauth.email().to_string();
         let folder = folder.to_string();
         let flag_cmd = flag_cmd.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let mut session = Self::connect_sync(&host, port, &email, &access_token)?;
+            let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
             session.uid_store(uid.to_string(), &flag_cmd)?;
             session.logout()?;

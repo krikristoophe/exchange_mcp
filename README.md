@@ -36,12 +36,14 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | `delete_email` | Supprimer (deplace vers Deleted Items) |
 | `set_flag` | Ajouter/retirer un flag IMAP |
 | `folder_status` | Stats d'un dossier (total, non lus, recents) |
-| `create_draft` | Creer un brouillon dans le dossier Drafts |
-| `send_draft` | Envoyer un brouillon existant (supprime le brouillon apres envoi) |
+| `create_draft` | Creer un brouillon dans le dossier Drafts (retourne l'UID) |
+| `update_draft` | Modifier un brouillon existant (retourne le nouvel UID) |
+| `send_draft` | Envoyer un brouillon existant (supprime le brouillon apres envoi, retourne l'UID dans Sent Items) |
 | `delete_draft` | Supprimer un brouillon (deplace vers Deleted Items) |
-| `send_email` | Envoyer un email via SMTP (copie dans Sent Items) |
-| `reply` | Repondre a un email (avec citation) |
-| `forward` | Transferer un email |
+| `send_email` | Envoyer un email via SMTP (copie dans Sent Items, retourne l'UID) |
+| `reply_email` | Repondre a un email (avec citation, retourne l'UID dans Sent Items) |
+| `forward_email` | Transferer un email (retourne l'UID dans Sent Items) |
+| `list_contacts` | Lister les contacts extraits des emails recents |
 
 ## Installation
 
@@ -284,6 +286,22 @@ Creer un brouillon et le sauvegarder dans le dossier Drafts. L'email n'est PAS e
 | `subject` | string | oui | Objet |
 | `body` | string | oui | Corps (texte brut) |
 
+**Retour :** `{ message, uid, folder }`
+
+### update_draft
+
+Modifier un brouillon existant. Seuls les champs fournis sont mis a jour, les autres conservent leur valeur actuelle.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `uid` | entier | oui | UID du brouillon a modifier |
+| `to` | string[] | non | Nouveaux destinataires (si omis, conserve les actuels) |
+| `cc` | string[] | non | Nouvelle copie carbone (si omis, conserve les actuels) |
+| `subject` | string | non | Nouvel objet (si omis, conserve l'actuel) |
+| `body` | string | non | Nouveau corps (si omis, conserve l'actuel) |
+
+**Retour :** `{ message, uid, folder }` (le UID change car IMAP ne permet pas l'edition en place)
+
 ### send_draft
 
 Envoyer un brouillon existant. Recupere le brouillon par UID, l'envoie via SMTP, le sauvegarde dans Sent Items, puis le supprime du dossier Drafts.
@@ -311,7 +329,7 @@ Envoyer un email via SMTP. Une copie est sauvegardee dans Sent Items.
 | `subject` | string | oui | Objet |
 | `body` | string | oui | Corps (texte brut) |
 
-### reply
+### reply_email
 
 Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
 
@@ -322,7 +340,7 @@ Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
 | `body` | string | oui | — | Corps de la reponse |
 | `reply_all` | bool | non | false | Repondre a tous |
 
-### forward
+### forward_email
 
 Transferer un email a de nouveaux destinataires.
 
@@ -334,13 +352,25 @@ Transferer un email a de nouveaux destinataires.
 | `cc` | string[] | non | Copie carbone |
 | `body` | string | non | Message additionnel |
 
+### list_contacts
+
+Lister les contacts extraits des en-tetes (From, To, Cc) des emails recents. Les contacts sont dedupliques par email et tries par frequence.
+
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `limit` | entier | non | 50 | Nombre max de contacts a retourner |
+| `folders` | string[] | non | `["INBOX", "Sent Items"]` | Dossiers a scanner. `["ALL"]` pour tous. |
+| `scan_limit` | entier | non | 100 | Nombre d'emails recents a scanner par dossier |
+
+**Retour :** liste de `{ email, name?, frequency }`
+
 ## Architecture
 
 ```
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP + init crypto
 ├── config.rs           # Chargement configuration (fichier + env)
-├── server.rs           # Definition des 17 outils MCP
+├── server.rs           # Definition des 19 outils MCP
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
 ├── cache.rs            # Cache en memoire avec TTL (dossiers, listes, details, statuts)
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials

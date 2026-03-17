@@ -56,6 +56,14 @@ pub struct AttachmentInfo {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ContactInfo {
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub frequency: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FolderStatus {
     pub name: String,
     pub total: u32,
@@ -487,6 +495,22 @@ impl ImapClient {
         .await?
     }
 
+    /// Get the UID of the last message in a folder (used after APPEND to retrieve the new UID).
+    fn get_last_uid(
+        session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>,
+        folder: &str,
+    ) -> Result<u32> {
+        let mailbox = session.select(folder)?;
+        let total = mailbox.exists;
+        if total == 0 {
+            anyhow::bail!("Folder is empty after append");
+        }
+        let range = format!("{total}:{total}");
+        let messages = session.fetch(&range, "UID")?;
+        let msg = messages.iter().next().context("Could not fetch last message UID")?;
+        msg.uid.context("No UID for last message")
+    }
+
     /// Build an RFC 822 message from components.
     fn build_message(
         from: &str,
@@ -603,6 +627,7 @@ impl ImapClient {
     }
 
     /// Create a draft email (saved to Drafts folder via IMAP APPEND).
+    /// Returns the UID of the created draft.
     pub async fn create_draft(
         &self,
         to: &[String],
@@ -626,9 +651,112 @@ impl ImapClient {
             session
                 .append_with_flags("Drafts", rfc822.as_bytes(), &[imap::types::Flag::Draft])
                 .context("Failed to save draft")?;
+
+            let uid = Self::get_last_uid(&mut session, "Drafts")?;
+
             session.logout()?;
             cache.invalidate_folder("Drafts");
-            Ok("Draft saved to Drafts folder".to_string())
+            Ok(serde_json::json!({
+                "message": "Draft saved to Drafts folder",
+                "uid": uid,
+                "folder": "Drafts"
+            }).to_string())
+        })
+        .await?
+    }
+
+    /// Update an existing draft: fetch it, merge with new fields, delete old, append new.
+    pub async fn update_draft(
+        &self,
+        uid: u32,
+        to: Option<Vec<String>>,
+        cc: Option<Vec<String>>,
+        subject: Option<String>,
+        body: Option<String>,
+    ) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let cache = self.cache.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, ImapCredentials {
+                username: credentials.username.clone(),
+                password: credentials.password.clone(),
+            })?;
+            session.select("Drafts")?;
+
+            // 1. Fetch original draft to extract current fields
+            let messages = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+            let msg = messages.iter().next().context("Draft not found")?;
+            let raw = msg.body().context("No message body")?;
+
+            let parsed = mailparse::parse_mail(raw).context("Failed to parse draft")?;
+
+            // Extract current values from headers
+            let mut current_to = Vec::new();
+            let mut current_cc = Vec::new();
+            let mut current_subject = String::new();
+
+            for hdr in &parsed.headers {
+                let key = hdr.get_key().to_lowercase();
+                match key.as_str() {
+                    "to" => {
+                        for addr in hdr.get_value().split(',') {
+                            let addr = addr.trim().to_string();
+                            if !addr.is_empty() {
+                                current_to.push(addr);
+                            }
+                        }
+                    }
+                    "cc" => {
+                        for addr in hdr.get_value().split(',') {
+                            let addr = addr.trim().to_string();
+                            if !addr.is_empty() {
+                                current_cc.push(addr);
+                            }
+                        }
+                    }
+                    "subject" => {
+                        current_subject = hdr.get_value();
+                    }
+                    _ => {}
+                }
+            }
+
+            // Extract current body text
+            let current_body = parsed.get_body().unwrap_or_default();
+
+            // Merge: use provided values or fall back to current
+            let final_to = to.unwrap_or(current_to);
+            let final_cc = cc.unwrap_or(current_cc);
+            let final_subject = subject.unwrap_or(current_subject);
+            let final_body = body.unwrap_or(current_body);
+
+            drop(messages);
+
+            // 2. Delete old draft
+            session.uid_store(uid.to_string(), "+FLAGS (\\Deleted)")?;
+            session.expunge()?;
+
+            // 3. Build and append new draft
+            let from = credentials.username.clone();
+            let rfc822 = Self::build_message(&from, &final_to, &final_cc, &final_subject, &final_body, None, None)?;
+
+            session
+                .append_with_flags("Drafts", rfc822.as_bytes(), &[imap::types::Flag::Draft])
+                .context("Failed to save updated draft")?;
+
+            let new_uid = Self::get_last_uid(&mut session, "Drafts")?;
+
+            session.logout()?;
+            cache.invalidate_folder("Drafts");
+
+            Ok(serde_json::json!({
+                "message": "Draft updated in Drafts folder",
+                "uid": new_uid,
+                "folder": "Drafts"
+            }).to_string())
         })
         .await?
     }
@@ -666,12 +794,20 @@ impl ImapClient {
             // 3. Delete the draft
             session.uid_store(uid.to_string(), "+FLAGS (\\Deleted)")?;
             session.expunge()?;
+
+            // 4. Get UID of saved copy in Sent Items
+            let sent_uid = Self::get_last_uid(&mut session, "Sent Items").ok();
+
             session.logout()?;
 
             cache.invalidate_folder("Drafts");
             cache.invalidate_folder("Sent Items");
 
-            Ok("Draft sent and removed from Drafts folder".to_string())
+            Ok(serde_json::json!({
+                "message": "Draft sent and removed from Drafts folder",
+                "uid": sent_uid,
+                "folder": "Sent Items"
+            }).to_string())
         })
         .await?
     }
@@ -706,8 +842,24 @@ impl ImapClient {
                 &credentials,
                 rfc822.as_bytes(),
             )?;
+
+            // Get UID of saved copy in Sent Items
+            let sent_uid = {
+                let mut session = Self::connect_sync(&imap_host, imap_port, ImapCredentials {
+                    username: credentials.username,
+                    password: credentials.password,
+                })?;
+                let uid = Self::get_last_uid(&mut session, "Sent Items").ok();
+                session.logout()?;
+                uid
+            };
+
             cache.invalidate_folder("Sent Items");
-            Ok("Email sent successfully".to_string())
+            Ok(serde_json::json!({
+                "message": "Email sent successfully",
+                "uid": sent_uid,
+                "folder": "Sent Items"
+            }).to_string())
         })
         .await?
     }
@@ -790,11 +942,23 @@ impl ImapClient {
                 &credentials,
                 rfc822.as_bytes(),
             )?;
+
+            let sent_uid = {
+                let mut session = Self::connect_sync(&imap_host, imap_port, ImapCredentials {
+                    username: credentials.username,
+                    password: credentials.password,
+                })?;
+                let uid = Self::get_last_uid(&mut session, "Sent Items").ok();
+                session.logout()?;
+                uid
+            };
+
             cache.invalidate_folder("Sent Items");
-            Ok(format!(
-                "Reply sent to {}",
-                to_addrs.join(", ")
-            ))
+            Ok(serde_json::json!({
+                "message": format!("Reply sent to {}", to_addrs.join(", ")),
+                "uid": sent_uid,
+                "folder": "Sent Items"
+            }).to_string())
         })
         .await?
     }
@@ -857,11 +1021,143 @@ impl ImapClient {
                 &credentials,
                 rfc822.as_bytes(),
             )?;
+
+            let sent_uid = {
+                let mut session = Self::connect_sync(&imap_host, imap_port, ImapCredentials {
+                    username: credentials.username,
+                    password: credentials.password,
+                })?;
+                let uid = Self::get_last_uid(&mut session, "Sent Items").ok();
+                session.logout()?;
+                uid
+            };
+
             cache.invalidate_folder("Sent Items");
-            Ok(format!(
-                "Email forwarded to {}",
-                to_display.join(", ")
-            ))
+            Ok(serde_json::json!({
+                "message": format!("Email forwarded to {}", to_display.join(", ")),
+                "uid": sent_uid,
+                "folder": "Sent Items"
+            }).to_string())
+        })
+        .await?
+    }
+
+    /// List contacts extracted from email headers (From, To, Cc) in specified folders.
+    pub async fn list_contacts(
+        &self,
+        folders: &[String],
+        scan_limit: u32,
+        result_limit: u32,
+    ) -> Result<Vec<ContactInfo>> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let own_email = credentials.username.clone().to_lowercase();
+        let folders = folders.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, ImapCredentials {
+                username: credentials.username,
+                password: credentials.password,
+            })?;
+
+            // Collect (email -> (name, count))
+            let mut contacts: std::collections::HashMap<String, (Option<String>, u32)> =
+                std::collections::HashMap::new();
+
+            let folders_to_scan = if folders.len() == 1 && folders[0] == "ALL" {
+                // List all folders
+                let mailboxes = session.list(Some(""), Some("*"))?;
+                mailboxes.iter().map(|mb| mb.name().to_string()).collect::<Vec<_>>()
+            } else {
+                folders
+            };
+
+            for folder in &folders_to_scan {
+                let mailbox = match session.select(folder) {
+                    Ok(mb) => mb,
+                    Err(_) => continue, // skip inaccessible folders
+                };
+
+                let total = mailbox.exists;
+                if total == 0 {
+                    continue;
+                }
+
+                let start = if total > scan_limit { total - scan_limit + 1 } else { 1 };
+                let range = format!("{start}:{total}");
+
+                let messages = match session.fetch(&range, "(UID ENVELOPE)") {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                for msg in messages.iter() {
+                    if let Some(envelope) = msg.envelope() {
+                        // Process all address fields
+                        let address_lists = [
+                            envelope.from.as_deref(),
+                            envelope.to.as_deref(),
+                            envelope.cc.as_deref(),
+                        ];
+
+                        for addrs_opt in &address_lists {
+                            if let Some(addrs) = addrs_opt {
+                                for addr in *addrs {
+                                    let mailbox = addr.mailbox.as_ref()
+                                        .map(|m| String::from_utf8_lossy(m).to_string())
+                                        .unwrap_or_default();
+                                    let host_part = addr.host.as_ref()
+                                        .map(|h| String::from_utf8_lossy(h).to_string())
+                                        .unwrap_or_default();
+
+                                    if mailbox.is_empty() || host_part.is_empty() {
+                                        continue;
+                                    }
+
+                                    let email = format!("{mailbox}@{host_part}").to_lowercase();
+
+                                    // Skip own email
+                                    if email == own_email {
+                                        continue;
+                                    }
+
+                                    let name = addr.name.as_ref()
+                                        .map(|n| {
+                                            let s = String::from_utf8_lossy(n).to_string();
+                                            if s.contains("=?") {
+                                                // Decode RFC 2047 encoded names
+                                                super::parse::decode_rfc2047_public(&s)
+                                            } else {
+                                                s
+                                            }
+                                        })
+                                        .filter(|n| !n.is_empty());
+
+                                    let entry = contacts.entry(email).or_insert((None, 0));
+                                    // Keep the first non-empty name we find
+                                    if entry.0.is_none() && name.is_some() {
+                                        entry.0 = name;
+                                    }
+                                    entry.1 += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            session.logout()?;
+
+            // Sort by frequency descending
+            let mut result: Vec<ContactInfo> = contacts
+                .into_iter()
+                .map(|(email, (name, frequency))| ContactInfo { email, name, frequency })
+                .collect();
+            result.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+            result.truncate(result_limit as usize);
+
+            Ok(result)
         })
         .await?
     }

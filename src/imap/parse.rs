@@ -217,6 +217,11 @@ fn decode_imap_utf8(data: &[u8]) -> String {
     }
 }
 
+/// Public wrapper for decode_rfc2047, used by contact extraction.
+pub fn decode_rfc2047_public(s: &str) -> String {
+    decode_rfc2047(s)
+}
+
 fn decode_rfc2047(s: &str) -> String {
     let mut result = String::new();
     let mut remaining = s;

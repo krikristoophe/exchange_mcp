@@ -148,6 +148,24 @@ pub struct CreateDraftParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateDraftParams {
+    /// UID of the draft to update (from the Drafts folder)
+    pub uid: u32,
+    /// New recipient email addresses (if omitted, keeps original recipients)
+    #[serde(default)]
+    pub to: Option<Vec<String>>,
+    /// New CC recipients (if omitted, keeps original CC)
+    #[serde(default)]
+    pub cc: Option<Vec<String>>,
+    /// New subject (if omitted, keeps original subject)
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// New body in plain text (if omitted, keeps original body)
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendDraftParams {
     /// UID of the draft to send (from the Drafts folder)
     pub uid: u32,
@@ -183,6 +201,19 @@ pub struct ReplyParams {
     /// Reply to all recipients (default: false)
     #[serde(default)]
     pub reply_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListContactsParams {
+    /// Maximum number of contacts to return (default: 50)
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Folders to scan for contacts. Default: ["INBOX", "Sent Items"]. Use ["ALL"] to scan all folders.
+    #[serde(default)]
+    pub folders: Option<Vec<String>>,
+    /// Number of recent emails to scan per folder (default: 100)
+    #[serde(default)]
+    pub scan_limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -362,6 +393,14 @@ impl ExchangeMcpServer {
         }
     }
 
+    #[tool(description = "Update an existing draft email in the Drafts folder. Fetches the current draft, replaces only the provided fields (to, cc, subject, body), and saves the updated version. The old draft is deleted. Returns the new UID. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
+    async fn update_draft(&self, Parameters(params): Parameters<UpdateDraftParams>) -> String {
+        match self.imap.update_draft(params.uid, params.to, params.cc, params.subject, params.body).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error updating draft: {e}"),
+        }
+    }
+
     #[tool(description = "Send a draft email from the Drafts folder. Fetches the draft by UID, sends it via SMTP, saves to Sent Items, and removes it from Drafts. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
     async fn send_draft(&self, Parameters(params): Parameters<SendDraftParams>) -> String {
         match self.imap.send_draft(params.uid).await {
@@ -387,7 +426,7 @@ impl ExchangeMcpServer {
     }
 
     #[tool(description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients.")]
-    async fn reply(&self, Parameters(params): Parameters<ReplyParams>) -> String {
+    async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> String {
         let reply_all = params.reply_all.unwrap_or(false);
         match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all).await {
             Ok(msg) => msg,
@@ -395,8 +434,19 @@ impl ExchangeMcpServer {
         }
     }
 
+    #[tool(description = "List contacts extracted from recent emails. Scans From, To, and Cc headers in the specified folders (default: INBOX + Sent Items) to build a contact list with name and email. Contacts are deduplicated by email and sorted by frequency (most contacted first).")]
+    async fn list_contacts(&self, Parameters(params): Parameters<ListContactsParams>) -> String {
+        let limit = params.limit.unwrap_or(50);
+        let scan_limit = params.scan_limit.unwrap_or(100);
+        let folders = params.folders.unwrap_or_else(|| vec!["INBOX".to_string(), "Sent Items".to_string()]);
+        match self.imap.list_contacts(&folders, scan_limit, limit).await {
+            Ok(contacts) => serde_json::to_string_pretty(&contacts).unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Error listing contacts: {e}"),
+        }
+    }
+
     #[tool(description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.")]
-    async fn forward(&self, Parameters(params): Parameters<ForwardParams>) -> String {
+    async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> String {
         match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body).await {
             Ok(msg) => msg,
             Err(e) => format!("Error forwarding email: {e}"),
@@ -414,9 +464,11 @@ impl ServerHandler for ExchangeMcpServer {
                  and search_emails to find specific messages. \
                  Reading emails does NOT mark them as read. \
                  Use include_preview=true on list/search to get text snippets without reading full emails. \
-                 Use create_draft to save a draft, send_draft to send it later, \
-                 delete_draft to discard it. Use send_email to send a new email, \
-                 reply to respond to an email, and forward to forward an email.",
+                 Use create_draft to save a draft, update_draft to modify it, \
+                 send_draft to send it later, delete_draft to discard it. \
+                 Use send_email to send a new email, reply_email to respond to an email, \
+                 forward_email to forward an email, and list_contacts to discover contacts \
+                 from recent emails.",
             )
     }
 

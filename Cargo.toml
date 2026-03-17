@@ -2,11 +2,11 @@
 name = "exchange-mcp"
 version = "0.1.0"
 edition = "2021"
-description = "MCP server for IMAP email access with Microsoft Exchange OAuth2 authentication"
+description = "MCP server for IMAP email access with OAuth 2.1 multi-user authentication"
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "1.2", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
+rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -15,9 +15,6 @@ tokio = { version = "1", features = ["full"] }
 imap = "2"
 imap-proto = "0.10"
 native-tls = "0.2"
-
-# OAuth2
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -31,8 +28,18 @@ mailparse = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# HTTP server (for streamable HTTP transport)
+# HTTP server
 axum = "0.8"
+tower = "0.5"
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+
+# OAuth 2.1 server
+sha2 = "0.10"
+rusqlite = { version = "0.34", features = ["bundled"] }
+rand = "0.9"
+url = "2"
 
 # Utils
 async-trait = "0.1"
@@ -40,3 +47,4 @@ anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+uuid = { version = "1", features = ["v4"] }

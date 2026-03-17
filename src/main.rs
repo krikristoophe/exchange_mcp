@@ -2,26 +2,28 @@ mod auth;
 mod config;
 mod imap_client;
 mod login;
-mod oauth;
+mod oauth2_server;
+mod oauth2_store;
 mod server;
+mod session;
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use rmcp::ServiceExt;
-use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
-use crate::auth::{AuthProvider, BasicAuthProvider};
-use crate::config::Config;
-use crate::imap_client::ImapClient;
-use crate::login::AppState;
-use crate::oauth::OAuthManager;
+use crate::oauth2_server::OAuth2State;
+use crate::oauth2_store::OAuth2Store;
 use crate::server::ExchangeMcpServer;
+use crate::session::SessionStore;
+
+tokio::task_local! {
+    /// The current user's session token, set by the MCP auth middleware.
+    pub static CURRENT_USER_TOKEN: String;
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging to stderr (stdout is used for MCP stdio transport)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -31,80 +33,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Exchange MCP Server");
 
-    // Load configuration
-    let config = Config::load()?;
-
-    match config.transport.as_str() {
-        "http" => {
-            // In HTTP mode, try to set up auth but allow starting without it
-            // (login page will handle authentication)
-            let imap = try_create_imap_client(&config).await;
-            start_http_server(imap, config).await?;
-        }
-        _ => {
-            // stdio mode requires auth to be configured upfront
-            let imap = create_imap_client(&config).await?;
-            let mcp_server = ExchangeMcpServer::new(imap);
-            start_stdio_server(mcp_server).await?;
-        }
-    }
-
-    Ok(())
+    let config = config::Config::load()?;
+    start_http_server(config).await
 }
 
-/// Try to create an IMAP client from config. Returns None if auth is not configured.
-async fn try_create_imap_client(config: &Config) -> Option<Arc<ImapClient>> {
-    match create_imap_client(config).await {
-        Ok(imap) => {
-            tracing::info!("Auth pre-configured, IMAP client ready");
-            Some(imap)
-        }
-        Err(e) => {
-            tracing::info!("Auth not pre-configured ({e}), login page will be available at /");
-            None
-        }
-    }
-}
-
-/// Create an IMAP client from config, returning an error if auth is not configured.
-async fn create_imap_client(config: &Config) -> Result<Arc<ImapClient>> {
-    let auth_provider: Arc<dyn AuthProvider> = match config.auth_method.as_str() {
-        "basic" => {
-            let username = config.username.clone().unwrap_or_else(|| config.email.clone());
-            let password = config.password.clone()
-                .ok_or_else(|| anyhow::anyhow!("password is required for basic auth"))?;
-            tracing::info!("Using basic (login/password) authentication");
-            Arc::new(BasicAuthProvider::new(username, password, config.email.clone()))
-        }
-        _ => {
-            if config.client_id.is_empty() || config.tenant_id.is_empty() {
-                anyhow::bail!("client_id and tenant_id are required for OAuth2 auth");
-            }
-            let oauth = Arc::new(OAuthManager::new(config)?);
-            oauth.load_cached_token().await?;
-            tracing::info!("Using OAuth2 (Microsoft 365) authentication");
-            oauth
-        }
-    };
-
-    Ok(Arc::new(ImapClient::new(
-        auth_provider,
-        config.imap_host.clone(),
-        config.imap_port,
-    )))
-}
-
-async fn start_stdio_server(server: ExchangeMcpServer) -> Result<()> {
-    tracing::info!("Starting MCP server on stdio");
-
-    let transport = rmcp::transport::io::stdio();
-    let service = server.serve(transport).await?;
-    service.waiting().await?;
-
-    Ok(())
-}
-
-async fn start_http_server(imap: Option<Arc<ImapClient>>, config: Config) -> Result<()> {
+async fn start_http_server(config: config::Config) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService,
         session::local::LocalSessionManager,
@@ -114,45 +47,201 @@ async fn start_http_server(imap: Option<Arc<ImapClient>>, config: Config) -> Res
     let addr = format!("{}:{}", config.sse_host, config.sse_port);
     tracing::info!("Starting MCP Streamable HTTP server on {addr}");
 
-    let app_state = Arc::new(AppState {
-        imap: RwLock::new(imap),
-        config: RwLock::new(config),
+    let session_store = Arc::new(SessionStore::new());
+
+    let issuer = config.issuer_url();
+
+    let oauth2_store = Arc::new(OAuth2Store::open(Some(OAuth2Store::db_path()))?);
+    tracing::info!("OAuth2 store: {:?}", OAuth2Store::db_path());
+
+    let _ = oauth2_store.cleanup_expired();
+
+    let oauth2_state = Arc::new(OAuth2State {
+        store: oauth2_store.clone(),
+        sessions: session_store.clone(),
+        issuer: issuer.clone(),
     });
 
-    // MCP service — uses a closure that reads the current IMAP client from state
-    let state_for_mcp = app_state.clone();
+    // MCP service — the factory reads CURRENT_USER_TOKEN task-local
+    // to determine which user's IMAP client to use.
+    let sessions_for_mcp = session_store.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let server_config = StreamableHttpServerConfig::default();
 
     let mcp_service = StreamableHttpService::new(
         move || {
-            let state = state_for_mcp.clone();
-            // We need to get the imap client synchronously here.
-            // Use try_read to avoid blocking; if not available, return error.
-            let imap_guard = state.imap.blocking_read();
-            match imap_guard.as_ref() {
-                Some(imap) => Ok(ExchangeMcpServer::new(imap.clone())),
-                None => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Not authenticated. Please visit the login page at / first.")),
+            let token = CURRENT_USER_TOKEN.try_with(|t| t.clone()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Not authenticated.",
+                )
+            })?;
+
+            let sessions = sessions_for_mcp.clone();
+            let guard = sessions.sessions_blocking_read();
+            match guard.get(&token) {
+                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Invalid or expired session token.",
+                )),
             }
         },
         session_manager,
         server_config,
     );
 
-    // Build the router with login routes + MCP
+    // Wrap MCP service with auth middleware that:
+    // 1. Extracts Bearer token from the Authorization header
+    // 2. Resolves OAuth2 access tokens to session tokens
+    // 3. Returns 401 with RFC 9728 metadata hint when no valid token
+    let auth_mcp = AuthMcpService {
+        inner: mcp_service,
+        oauth2_store,
+        issuer: issuer.clone(),
+    };
+
     let router = axum::Router::new()
-        .route("/", axum::routing::get(login::login_page))
-        .route("/api/login", axum::routing::post(login::api_login))
-        .route("/api/status", axum::routing::get(login::api_status))
         .route("/favicon.ico", axum::routing::get(login::favicon))
-        .with_state(app_state)
-        .nest_service("/mcp", mcp_service);
+        // OAuth 2.1 well-known endpoints
+        .route(
+            "/.well-known/oauth-protected-resource",
+            axum::routing::get(oauth2_server::protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            axum::routing::get(oauth2_server::authorization_server_metadata),
+        )
+        // OAuth 2.1 endpoints
+        .route(
+            "/oauth/register",
+            axum::routing::post(oauth2_server::register_client),
+        )
+        .route(
+            "/oauth/authorize",
+            axum::routing::get(oauth2_server::authorize_get)
+                .post(oauth2_server::authorize_post),
+        )
+        .route(
+            "/oauth/token",
+            axum::routing::post(oauth2_server::token_endpoint),
+        )
+        .with_state(oauth2_state)
+        // MCP endpoint (with auth middleware)
+        .nest_service("/mcp", auth_mcp);
 
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Login page:  http://{addr}/");
-    tracing::info!("MCP endpoint: http://{addr}/mcp");
+    tracing::info!("MCP endpoint: http://{addr}/mcp (OAuth 2.1)");
+    tracing::info!("OAuth metadata: http://{addr}/.well-known/oauth-authorization-server");
 
     axum::serve(tcp_listener, router).await?;
 
     Ok(())
+}
+
+/// Tower Service wrapper that extracts the Bearer token from the request,
+/// resolves OAuth2 access tokens to session tokens, and sets the
+/// CURRENT_USER_TOKEN task-local before delegating to the inner MCP service.
+///
+/// Returns HTTP 401 with `WWW-Authenticate` header (RFC 9728) when no valid token.
+#[derive(Clone)]
+struct AuthMcpService<S> {
+    inner: S,
+    oauth2_store: Arc<OAuth2Store>,
+    issuer: String,
+}
+
+impl<S, B> tower::Service<http::Request<B>> for AuthMcpService<S>
+where
+    S: tower::Service<http::Request<B>> + Clone + Send + 'static,
+    S::Response: IntoMcpResponse + Send + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    S::Future: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = http::Response<axum::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        match self.inner.poll_ready(cx) {
+            std::task::Poll::Ready(_) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+        let bearer_token = login::extract_bearer_token(&req);
+        let oauth2_store = self.oauth2_store.clone();
+        let issuer = self.issuer.clone();
+        let mut inner = self.inner.clone();
+        std::mem::swap(&mut self.inner, &mut inner);
+
+        Box::pin(async move {
+            // Resolve Bearer token → OAuth2 access token → session token
+            let session_token = bearer_token.and_then(|token| {
+                oauth2_store
+                    .get_token(&token)
+                    .ok()
+                    .flatten()
+                    .map(|stored| stored.session_token)
+            });
+
+            match session_token {
+                Some(st) => {
+                    let result =
+                        CURRENT_USER_TOKEN.scope(st, async move { inner.call(req).await }).await;
+                    match result {
+                        Ok(resp) => Ok(resp.into_mcp_response()),
+                        Err(e) => {
+                            let err_msg = format!("{}", e.into());
+                            Ok(http::Response::builder()
+                                .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(axum::body::Body::from(err_msg))
+                                .unwrap())
+                        }
+                    }
+                }
+                None => {
+                    // 401 with WWW-Authenticate header (RFC 9728)
+                    let www_auth = format!(
+                        r#"Bearer resource_metadata="{}/.well-known/oauth-protected-resource""#,
+                        issuer
+                    );
+                    Ok(http::Response::builder()
+                        .status(http::StatusCode::UNAUTHORIZED)
+                        .header("WWW-Authenticate", www_auth)
+                        .header("Content-Type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"error":"unauthorized","error_description":"Bearer token required. See WWW-Authenticate header for OAuth metadata."}"#,
+                        ))
+                        .unwrap())
+                }
+            }
+        })
+    }
+}
+
+/// Converts inner service response to http::Response<axum::body::Body>.
+trait IntoMcpResponse {
+    fn into_mcp_response(self) -> http::Response<axum::body::Body>;
+}
+
+impl IntoMcpResponse for http::Response<axum::body::Body> {
+    fn into_mcp_response(self) -> http::Response<axum::body::Body> {
+        self
+    }
+}
+
+impl IntoMcpResponse
+    for http::Response<http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>>
+{
+    fn into_mcp_response(self) -> http::Response<axum::body::Body> {
+        self.map(axum::body::Body::new)
+    }
 }

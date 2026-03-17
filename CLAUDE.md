@@ -2,8 +2,8 @@
 
 ## Apercu du projet
 
-Serveur MCP en Rust pour acceder aux emails via IMAP. Multi-utilisateur,
-OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
+Serveur MCP en Rust pour acceder aux emails via IMAP et les envoyer via SMTP.
+Multi-utilisateur, OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 
 ## Stack technique
 
@@ -11,6 +11,7 @@ OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 - **rmcp** v1.2 — SDK MCP (server, streamable HTTP)
 - **axum** v0.8 — serveur HTTP
 - **imap** v2 — client IMAP (sync, utilise via `spawn_blocking`)
+- **lettre** v0.11 — client SMTP (envoi d'emails, STARTTLS)
 - **rusqlite** v0.34 (bundled) — stockage OAuth2
 - **tower** v0.5 — middleware de service
 - **aes-gcm** v0.10 — chiffrement AES-256-GCM des credentials
@@ -26,8 +27,8 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 .env.example            # Variables d'environnement (a copier en .env)
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
-├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
-├── server.rs           # ExchangeMcpServer + 11 outils MCP
+├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
+├── server.rs           # ExchangeMcpServer + 15 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -39,7 +40,7 @@ src/
 │   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions, CSRF tokens)
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
-    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons
     └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 
@@ -67,6 +68,7 @@ Client MCP
 - **Langue de l'UI** : francais (messages d'erreur utilisateur, formulaires HTML)
 - **Gestion d'erreur** : `anyhow::Result` partout, pas de `unwrap()` sur du code faillible
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
+- **SMTP** : envoi via `lettre` (STARTTLS) dans `spawn_blocking`, copie automatique dans "Sent Items" via IMAP APPEND
 - **Tokens** : generes via `base64(random_bytes(32))` URL-safe sans padding (256 bits)
 - **Sessions** : token aleatoire 256 bits comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts. Timeout d'inactivite de 8h avec nettoyage periodique (toutes les 5 min)
 - **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite, zeroizes en memoire au drop (`ZeroizeOnDrop`). Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`
@@ -92,7 +94,7 @@ Client MCP
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
 - Une tache periodique (toutes les 5 min) nettoie les sessions expirees et les tokens/codes orphelins
 - `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus
-- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread)
+- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread, create_draft, send, reply, forward)
 - `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
 - Les mots de passe existants en clair sont migres automatiquement (detection via `is_encrypted()`) lors de la lecture
 
@@ -101,6 +103,7 @@ Client MCP
 Voir la section complete dans le README.md. Les plus importantes :
 
 - `EXCHANGE_IMAP_HOST` / `EXCHANGE_IMAP_PORT` — serveur IMAP cible
+- `EXCHANGE_SMTP_HOST` / `EXCHANGE_SMTP_PORT` — serveur SMTP cible (defaut: smtp.office365.com:587)
 - `EXCHANGE_MCP_SSE_HOST` / `EXCHANGE_MCP_SSE_PORT` — adresse d'ecoute HTTP
 - `EXCHANGE_MCP_ISSUER` — URL publique du serveur (derriere un proxy)
 - `EXCHANGE_MCP_OAUTH_DB` — chemin de la base SQLite OAuth2

@@ -69,7 +69,13 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             for ps in persisted {
                 let auth: Arc<dyn AuthProvider> =
                     Arc::new(BasicAuthProvider::new(ps.email.clone(), ps.password));
-                let imap_client = Arc::new(ImapClient::new(auth, ps.imap_host.clone(), ps.imap_port));
+                let imap_client = Arc::new(ImapClient::new(
+                    auth,
+                    ps.imap_host.clone(),
+                    ps.imap_port,
+                    config.smtp_host.clone(),
+                    config.smtp_port,
+                ));
                 session_store.insert(
                     ps.session_token.clone(),
                     UserSession {
@@ -100,6 +106,8 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         issuer: issuer.clone(),
         default_imap_host: config.imap_host.clone(),
         default_imap_port: config.imap_port,
+        default_smtp_host: config.smtp_host.clone(),
+        default_smtp_port: config.smtp_port,
     });
 
     // Periodic cleanup task — runs every 5 minutes

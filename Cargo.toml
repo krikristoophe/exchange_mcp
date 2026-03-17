@@ -51,6 +51,9 @@ zeroize = { version = "1", features = ["derive"] }
 # Charset conversion (RFC 2047)
 encoding_rs = "0.8"
 
+# SMTP (email sending)
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+
 # Utils
 async-trait = "0.1"
 anyhow = "1"

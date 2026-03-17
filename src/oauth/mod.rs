@@ -15,4 +15,8 @@ pub struct OAuth2State {
     pub default_imap_host: String,
     /// Default IMAP port from config (env or config file).
     pub default_imap_port: u16,
+    /// Default SMTP host from config.
+    pub default_smtp_host: String,
+    /// Default SMTP port from config.
+    pub default_smtp_port: u16,
 }

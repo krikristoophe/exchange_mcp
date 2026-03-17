@@ -421,7 +421,13 @@ pub async fn authorize_post(
                 email.clone(),
                 password.clone(),
             ));
-            let imap_client = Arc::new(ImapClient::new(auth, imap_host.clone(), imap_port));
+            let imap_client = Arc::new(ImapClient::new(
+                auth,
+                imap_host.clone(),
+                imap_port,
+                state.default_smtp_host.clone(),
+                state.default_smtp_port,
+            ));
             let session_token = random_token(32);
 
             state

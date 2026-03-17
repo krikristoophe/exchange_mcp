@@ -20,6 +20,7 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 - Lecture batch (plusieurs emails en un seul appel)
 - Snippets/previews dans les listes sans lire le contenu complet
 - Compatible avec tout serveur IMAP (Exchange, Gmail, Dovecot, etc.)
+- MCP Apps (SEP-1865) : interfaces HTML interactives dans le chat (preview email, liste inbox)
 
 ### Outils MCP
 
@@ -364,13 +365,49 @@ Lister les contacts extraits des en-tetes (From, To, Cc) des emails recents. Les
 
 **Retour :** liste de `{ email, name?, frequency }`
 
+## MCP Apps (interfaces interactives)
+
+Le serveur supporte l'extension MCP Apps (SEP-1865), qui permet d'afficher des interfaces HTML interactives directement dans le chat des clients compatibles (Claude.ai, Claude Desktop, Cowork, VS Code, etc.).
+
+### UI Resources
+
+| URI | Description |
+|-----|-------------|
+| `ui://exchange/email-preview` | Preview d'un email avec zone de reponse/transfert |
+| `ui://exchange/inbox-list` | Liste des emails avec statut lu/non-lu, clic pour ouvrir |
+
+### Outils avec UI
+
+Les outils suivants declararent `_meta.ui.resourceUri` et retournent `structuredContent` pour l'UI :
+
+- `list_emails`, `search_emails` → `inbox-list` (liste interactive)
+- `read_email`, `reply_email`, `forward_email`, `send_email`, `create_draft`, `send_draft` → `email-preview` (preview email)
+
+Le `structuredContent` est envoye uniquement a l'UI (pas au LLM), ce qui permet de passer des donnees riches sans consommer de tokens. Le `content` texte reste toujours informatif et suffisant seul pour les clients qui ne supportent pas MCP Apps.
+
+### Capabilities
+
+Le serveur declare les capabilities suivantes a l'initialisation :
+
+```json
+{
+  "capabilities": {
+    "tools": {},
+    "resources": {},
+    "extensions": {
+      "io.modelcontextprotocol/ui": {}
+    }
+  }
+}
+```
+
 ## Architecture
 
 ```
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP + init crypto
 ├── config.rs           # Chargement configuration (fichier + env)
-├── server.rs           # Definition des 19 outils MCP
+├── server.rs           # Definition des 19 outils MCP + resources UI
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
 ├── cache.rs            # Cache en memoire avec TTL (dossiers, listes, details, statuts)
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials
@@ -380,6 +417,9 @@ src/
 │   ├── mod.rs          # OAuth2State + re-exports
 │   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
 │   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions chiffrees)
+├── ui_resources/       # Fichiers HTML pour MCP Apps (embarques au compile-time)
+│   ├── email_preview.html  # Preview d'un email avant/apres envoi
+│   └── inbox_list.html     # Liste des emails avec statut lu/non-lu
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
     ├── client.rs       # Operations IMAP (connexion, lecture, batch, recherche, flags, cache)

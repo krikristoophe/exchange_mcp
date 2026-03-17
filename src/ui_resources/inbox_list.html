@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Inbox</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 16px;
+      color: #1a1a1a;
+      background: transparent;
+    }
+    .folder-info {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+    .email-list { display: flex; flex-direction: column; gap: 1px; }
+    .email-item {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      cursor: pointer;
+      align-items: center;
+      transition: background 0.15s;
+    }
+    .email-item:hover { background: #f9fafb; }
+    .email-item.unread { font-weight: 600; }
+    .email-item.unread::before {
+      content: '';
+      width: 8px; height: 8px;
+      background: #2563eb;
+      border-radius: 50%;
+    }
+    .email-item:not(.unread)::before {
+      content: '';
+      width: 8px; height: 8px;
+    }
+    .email-info { overflow: hidden; }
+    .email-from { font-size: 13px; }
+    .email-subject {
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .email-preview {
+      font-size: 12px;
+      color: #6b7280;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .email-date { font-size: 12px; color: #9ca3af; white-space: nowrap; }
+    .empty { text-align: center; padding: 32px; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="folder-info" id="folder-info"></div>
+  <div class="email-list" id="list">
+    <div class="empty">Chargement...</div>
+  </div>
+
+  <script type="module">
+    import { App } from 'https://esm.sh/@modelcontextprotocol/ext-apps@0.4.1';
+
+    const app = new App({ name: 'inbox-list', version: '1.0.0' });
+    const listEl = document.getElementById('list');
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return '';
+      try {
+        const d = new Date(dateStr);
+        const now = new Date();
+        if (d.toDateString() === now.toDateString()) {
+          return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+        }
+        return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+      } catch (e) { return dateStr; }
+    }
+
+    function isUnread(email) {
+      if (email.is_read !== undefined) return !email.is_read;
+      if (email.flags) return !email.flags.includes('\\Seen');
+      return false;
+    }
+
+    function renderEmails(data) {
+      var emails = data.emails || data;
+      if (!emails || emails.length === 0) {
+        listEl.innerHTML = '<div class="empty">Aucun mail</div>';
+        return;
+      }
+
+      if (data.folder) {
+        document.getElementById('folder-info').textContent = data.folder + ' (' + emails.length + ')';
+      }
+
+      listEl.innerHTML = emails.map(function(e) {
+        var unread = isUnread(e);
+        return '<div class="email-item ' + (unread ? 'unread' : '') + '" data-uid="' + e.uid + '">' +
+          '<div class="email-info">' +
+            '<div class="email-from">' + escapeHtml(e.from || '') + '</div>' +
+            '<div class="email-subject">' + escapeHtml(e.subject || '(sans sujet)') + '</div>' +
+            '<div class="email-preview">' + escapeHtml(e.snippet || '') + '</div>' +
+          '</div>' +
+          '<div class="email-date">' + formatDate(e.date) + '</div>' +
+        '</div>';
+      }).join('');
+
+      listEl.querySelectorAll('.email-item').forEach(function(el) {
+        el.addEventListener('click', async function() {
+          var uid = el.dataset.uid;
+          await app.sendMessage({
+            role: 'user',
+            content: [{ type: 'text', text: 'Lis le mail uid:' + uid }]
+          });
+        });
+      });
+    }
+
+    app.ontoolinput = function(params) {
+      if (params.input) renderEmails(params.input);
+    };
+
+    app.ontoolresult = function(result) {
+      if (result.structuredContent) {
+        renderEmails(result.structuredContent);
+      }
+    };
+
+    await app.connect();
+  </script>
+</body>
+</html>

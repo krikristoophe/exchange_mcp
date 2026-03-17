@@ -4,15 +4,66 @@ use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResult, ListToolsResult,
-        ServerCapabilities, ServerInfo,
+        AnnotateAble, CallToolRequestParams, CallToolResult, Content,
+        ErrorData, ExtensionCapabilities, ListResourcesResult, ListToolsResult,
+        Meta, PaginatedRequestParams, RawResource, ReadResourceRequestParams,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo,
     },
     service::RequestContext, RoleServer,
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::imap::ImapClient;
+
+// UI resource constants
+const UI_MIME_TYPE: &str = "text/html;profile=mcp-app";
+const EMAIL_PREVIEW_URI: &str = "ui://exchange/email-preview";
+const INBOX_LIST_URI: &str = "ui://exchange/inbox-list";
+const EMAIL_PREVIEW_HTML: &str = include_str!("ui_resources/email_preview.html");
+const INBOX_LIST_HTML: &str = include_str!("ui_resources/inbox_list.html");
+
+fn ui_meta(resource_uri: &str) -> Meta {
+    let mut meta = Meta::new();
+    meta.insert(
+        "ui".to_string(),
+        json!({ "resourceUri": resource_uri }),
+    );
+    meta
+}
+
+fn ui_resources_list() -> ListResourcesResult {
+    ListResourcesResult {
+        resources: vec![
+            RawResource::new(EMAIL_PREVIEW_URI, "Email Preview")
+                .with_mime_type(UI_MIME_TYPE)
+                .no_annotation(),
+            RawResource::new(INBOX_LIST_URI, "Inbox List")
+                .with_mime_type(UI_MIME_TYPE)
+                .no_annotation(),
+        ],
+        ..Default::default()
+    }
+}
+
+fn read_ui_resource(uri: &str) -> Option<ResourceContents> {
+    let html = match uri {
+        EMAIL_PREVIEW_URI => EMAIL_PREVIEW_HTML,
+        INBOX_LIST_URI => INBOX_LIST_HTML,
+        _ => return None,
+    };
+    Some(
+        ResourceContents::text(html, uri)
+            .with_mime_type(UI_MIME_TYPE),
+    )
+}
+
+fn result_with_structured(text: String, structured: Value) -> Result<CallToolResult, ErrorData> {
+    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    result.structured_content = Some(structured);
+    Ok(result)
+}
 
 #[derive(Clone)]
 pub struct ExchangeMcpServer {
@@ -81,7 +132,7 @@ pub struct ReadEmailsParams {
 pub struct SearchEmailsParams {
     /// Folder to search in
     pub folder: String,
-    /// IMAP search query (e.g., "FROM \"john@example.com\"", "SUBJECT \"meeting\"", "UNSEEN", "SINCE 01-Jan-2024")
+    /// IMAP search query (e.g., "FROM \"john@example.com\"", "SUBJECT \"meeting\"", "SINCE 01-Jan-2024")
     pub query: String,
     /// Maximum number of results (default: 20)
     pub limit: Option<u32>,
@@ -261,7 +312,7 @@ fn process_email_detail(
             // Keep both as-is
         }
         _ => {
-            // "text" (default) — remove HTML to save tokens
+            // "text" (default) -- remove HTML to save tokens
             email.body_html = None;
         }
     }
@@ -279,24 +330,49 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "List recent emails in a folder. Returns subject, from, date, flags, size for each email. Use include_preview=true to also get a short text snippet (first ~200 chars) without reading the full email.")]
-    async fn list_emails(&self, Parameters(params): Parameters<ListEmailsParams>) -> String {
+    #[tool(
+        description = "List recent emails in a folder. Returns subject, from, date, flags, size for each email. Use include_preview=true to also get a short text snippet (first ~200 chars) without reading the full email.",
+        meta = ui_meta(INBOX_LIST_URI)
+    )]
+    async fn list_emails(&self, Parameters(params): Parameters<ListEmailsParams>) -> Result<CallToolResult, ErrorData> {
         let include_preview = params.include_preview.unwrap_or(false);
         match self.imap.list_emails(&params.folder, params.limit, include_preview).await {
-            Ok(emails) => serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error listing emails: {e}"),
+            Ok(emails) => {
+                let text = serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string());
+                let structured = json!({
+                    "folder": params.folder,
+                    "emails": serde_json::to_value(&emails).unwrap_or(Value::Null),
+                });
+                result_with_structured(text, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error listing emails: {e}"))])),
         }
     }
 
-    #[tool(description = "Read the full content of a single email. By default returns text only (no HTML) with quoted replies stripped to minimize token usage. Use format=\"both\" to include HTML, and strip_quotes=false to keep full thread. Does NOT mark the email as read.")]
-    async fn read_email(&self, Parameters(params): Parameters<ReadEmailParams>) -> String {
+    #[tool(
+        description = "Read the full content of a single email. By default returns text only (no HTML) with quoted replies stripped to minimize token usage. Use format=\"both\" to include HTML, and strip_quotes=false to keep full thread. Does NOT mark the email as read.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn read_email(&self, Parameters(params): Parameters<ReadEmailParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.read_email(&params.folder, params.uid).await {
             Ok(email) => {
                 let strip = params.strip_quotes.unwrap_or(true);
                 let email = process_email_detail(email, params.format.as_deref(), strip);
-                serde_json::to_string_pretty(&email).unwrap_or_else(|e| e.to_string())
+                let text = serde_json::to_string_pretty(&email).unwrap_or_else(|e| e.to_string());
+                let structured = json!({
+                    "uid": email.uid,
+                    "subject": email.subject,
+                    "from": email.from,
+                    "to": email.to,
+                    "cc": email.cc,
+                    "date": email.date,
+                    "body_text": email.body_text,
+                    "attachments": serde_json::to_value(&email.attachments).unwrap_or(Value::Null),
+                    "status": "read",
+                });
+                result_with_structured(text, structured)
             }
-            Err(e) => format!("Error reading email: {e}"),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error reading email: {e}"))])),
         }
     }
 
@@ -315,16 +391,27 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Search emails in a folder using IMAP search criteria. Examples: UNSEEN, FROM \"user@example.com\", SUBJECT \"meeting\", SINCE 01-Jan-2024. Use include_preview=true for text snippets.")]
-    async fn search_emails(&self, Parameters(params): Parameters<SearchEmailsParams>) -> String {
+    #[tool(
+        description = "Search emails in a folder using IMAP search criteria. Examples: UNSEEN, FROM \"user@example.com\", SUBJECT \"meeting\", SINCE 01-Jan-2024. Use include_preview=true for text snippets.",
+        meta = ui_meta(INBOX_LIST_URI)
+    )]
+    async fn search_emails(&self, Parameters(params): Parameters<SearchEmailsParams>) -> Result<CallToolResult, ErrorData> {
         let include_preview = params.include_preview.unwrap_or(false);
         match self
             .imap
             .search_emails(&params.folder, &params.query, params.limit, include_preview)
             .await
         {
-            Ok(emails) => serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error searching emails: {e}"),
+            Ok(emails) => {
+                let text = serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string());
+                let structured = json!({
+                    "folder": params.folder,
+                    "query": params.query,
+                    "emails": serde_json::to_value(&emails).unwrap_or(Value::Null),
+                });
+                result_with_structured(text, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error searching emails: {e}"))])),
         }
     }
 
@@ -385,11 +472,23 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it.")]
-    async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> String {
+    #[tool(
+        description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.create_draft(&params.to, &params.cc, &params.subject, &params.body).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error creating draft: {e}"),
+            Ok(msg) => {
+                let structured = json!({
+                    "to": params.to.join(", "),
+                    "cc": params.cc.join(", "),
+                    "subject": params.subject,
+                    "body_text": params.body,
+                    "status": "draft",
+                });
+                result_with_structured(msg, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error creating draft: {e}"))])),
         }
     }
 
@@ -401,11 +500,19 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Send a draft email from the Drafts folder. Fetches the draft by UID, sends it via SMTP, saves to Sent Items, and removes it from Drafts. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
-    async fn send_draft(&self, Parameters(params): Parameters<SendDraftParams>) -> String {
+    #[tool(
+        description = "Send a draft email from the Drafts folder. Fetches the draft by UID, sends it via SMTP, saves to Sent Items, and removes it from Drafts. Use list_emails with folder=\"Drafts\" to find the draft UID.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn send_draft(&self, Parameters(params): Parameters<SendDraftParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.send_draft(params.uid).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error sending draft: {e}"),
+            Ok(msg) => {
+                let structured = json!({
+                    "status": "sent",
+                });
+                result_with_structured(msg, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error sending draft: {e}"))])),
         }
     }
 
@@ -417,20 +524,41 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Send an email via SMTP. The sent message is saved to the Sent Items folder.")]
-    async fn send_email(&self, Parameters(params): Parameters<SendEmailParams>) -> String {
+    #[tool(
+        description = "Send an email via SMTP. The sent message is saved to the Sent Items folder.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn send_email(&self, Parameters(params): Parameters<SendEmailParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.send_email(&params.to, &params.cc, &params.subject, &params.body).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error sending email: {e}"),
+            Ok(msg) => {
+                let structured = json!({
+                    "to": params.to.join(", "),
+                    "cc": params.cc.join(", "),
+                    "subject": params.subject,
+                    "body_text": params.body,
+                    "status": "sent",
+                });
+                result_with_structured(msg, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error sending email: {e}"))])),
         }
     }
 
-    #[tool(description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients.")]
-    async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> String {
+    #[tool(
+        description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> Result<CallToolResult, ErrorData> {
         let reply_all = params.reply_all.unwrap_or(false);
         match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error sending reply: {e}"),
+            Ok(msg) => {
+                let structured = json!({
+                    "reply_body": params.body,
+                    "status": "sent",
+                });
+                result_with_structured(msg, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error sending reply: {e}"))])),
         }
     }
 
@@ -445,18 +573,41 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.")]
-    async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> String {
+    #[tool(
+        description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.",
+        meta = ui_meta(EMAIL_PREVIEW_URI)
+    )]
+    async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body).await {
-            Ok(msg) => msg,
-            Err(e) => format!("Error forwarding email: {e}"),
+            Ok(msg) => {
+                let structured = json!({
+                    "to": params.to.join(", "),
+                    "cc": params.cc.join(", "),
+                    "forward_body": params.body,
+                    "status": "sent",
+                });
+                result_with_structured(msg, structured)
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error forwarding email: {e}"))])),
         }
     }
 }
 
 impl ServerHandler for ExchangeMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut extensions = ExtensionCapabilities::new();
+        extensions.insert(
+            "io.modelcontextprotocol/ui".to_string(),
+            serde_json::from_value(json!({})).unwrap(),
+        );
+
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_extensions_with(extensions)
+            .build();
+
+        ServerInfo::new(capabilities)
             .with_instructions(
                 "Exchange MCP Server - Access Microsoft Exchange emails via IMAP/SMTP. \
                  Use list_folders to discover available folders, list_emails to browse, \
@@ -474,7 +625,7 @@ impl ServerHandler for ExchangeMcpServer {
 
     fn list_tools(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + Send + '_ {
         std::future::ready(Ok(ListToolsResult {
@@ -490,5 +641,28 @@ impl ServerHandler for ExchangeMcpServer {
     ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::model::ErrorData>> + Send + '_ {
         let tool_context = ToolCallContext::new(self, request, context);
         self.tool_router.call(tool_context)
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::model::ErrorData>> + Send + '_ {
+        std::future::ready(Ok(ui_resources_list()))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::model::ErrorData>> + Send + '_ {
+        let result = match read_ui_resource(&request.uri) {
+            Some(contents) => Ok(ReadResourceResult::new(vec![contents])),
+            None => Err(ErrorData::resource_not_found(
+                format!("Resource not found: {}", request.uri),
+                None,
+            )),
+        };
+        std::future::ready(result)
     }
 }

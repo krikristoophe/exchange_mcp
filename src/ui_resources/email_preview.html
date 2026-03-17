@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Email Preview</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 16px;
+      color: #1a1a1a;
+      background: transparent;
+    }
+    .email-card {
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .email-header {
+      background: #f5f5f5;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+    .email-header .from {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .email-header .subject {
+      font-size: 16px;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+    .email-header .date {
+      font-size: 12px;
+      color: #666;
+      margin-top: 2px;
+    }
+    .email-body {
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .reply-section {
+      border-top: 2px solid #2563eb;
+      padding: 16px;
+      background: #eff6ff;
+    }
+    .reply-section h3 {
+      font-size: 13px;
+      color: #2563eb;
+      margin-bottom: 8px;
+    }
+    .reply-body {
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .status {
+      padding: 8px 16px;
+      font-size: 12px;
+      color: #16a34a;
+      background: #f0fdf4;
+      text-align: center;
+      font-weight: 600;
+    }
+    .status.pending { color: #d97706; background: #fffbeb; }
+    .attachments {
+      padding: 8px 16px;
+      border-top: 1px solid #e0e0e0;
+      font-size: 12px;
+      color: #666;
+    }
+    .attachments span { margin-right: 12px; }
+  </style>
+</head>
+<body>
+  <div class="email-card">
+    <div class="email-header">
+      <div class="from" id="from"></div>
+      <div class="subject" id="subject"></div>
+      <div class="date" id="date"></div>
+    </div>
+    <div class="email-body" id="original-body">Chargement...</div>
+    <div class="attachments" id="attachments" style="display:none"></div>
+    <div class="reply-section" id="reply-section" style="display:none">
+      <h3 id="reply-label">Reponse</h3>
+      <div class="reply-body" id="reply-body"></div>
+    </div>
+    <div class="status pending" id="status">En attente...</div>
+  </div>
+
+  <script type="module">
+    import { App } from 'https://esm.sh/@modelcontextprotocol/ext-apps@0.4.1';
+
+    const app = new App({ name: 'email-preview', version: '1.0.0' });
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function renderEmail(data) {
+      if (!data) return;
+
+      if (data.to) {
+        document.getElementById('from').textContent = 'A : ' + data.to;
+      } else if (data.from) {
+        document.getElementById('from').textContent = 'De : ' + data.from;
+      }
+
+      document.getElementById('subject').textContent = data.subject || '';
+      document.getElementById('date').textContent = data.date || data.sent_at || '';
+
+      const body = data.original_body || data.body_text || data.body || '';
+      document.getElementById('original-body').textContent = body;
+
+      if (data.cc) {
+        const fromEl = document.getElementById('from');
+        fromEl.textContent += '\nCc : ' + data.cc;
+      }
+
+      if (data.attachments && data.attachments.length > 0) {
+        const attachEl = document.getElementById('attachments');
+        attachEl.style.display = 'block';
+        attachEl.innerHTML = data.attachments.map(function(a) {
+          return '<span>' + escapeHtml(a.filename || a.content_type) + '</span>';
+        }).join('');
+      }
+
+      if (data.reply_body) {
+        document.getElementById('reply-section').style.display = 'block';
+        document.getElementById('reply-body').textContent = data.reply_body;
+      }
+
+      if (data.forward_body) {
+        document.getElementById('reply-section').style.display = 'block';
+        document.getElementById('reply-label').textContent = 'Message transfere';
+        document.getElementById('reply-body').textContent = data.forward_body;
+      }
+
+      if (data.status === 'sent') {
+        document.getElementById('status').textContent = 'Envoye';
+        document.getElementById('status').className = 'status';
+      } else if (data.status === 'draft') {
+        document.getElementById('status').textContent = 'Brouillon enregistre';
+        document.getElementById('status').className = 'status';
+      } else if (data.status === 'read') {
+        document.getElementById('status').style.display = 'none';
+      }
+    }
+
+    app.ontoolinput = function(params) {
+      renderEmail(params.input);
+    };
+
+    app.ontoolresult = function(result) {
+      if (result.structuredContent) {
+        renderEmail(result.structuredContent);
+      }
+    };
+
+    await app.connect();
+  </script>
+</body>
+</html>

@@ -40,3 +40,6 @@ anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+tower = "0.5"
+http = "1"

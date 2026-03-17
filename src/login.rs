@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
     response::{Html, IntoResponse},
 };
 use serde::{Deserialize, Serialize};
@@ -12,10 +12,11 @@ use tokio::sync::RwLock;
 use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::config::Config;
 use crate::imap_client::ImapClient;
+use crate::session::{SessionStore, UserSession};
 
-/// Shared application state for the HTTP server.
+/// Shared application state for the multi-user HTTP server.
 pub struct AppState {
-    pub imap: RwLock<Option<Arc<ImapClient>>>,
+    pub sessions: Arc<SessionStore>,
     pub config: RwLock<Config>,
 }
 
@@ -41,6 +42,10 @@ fn default_imap_port() -> u16 {
 pub struct LoginResponse {
     pub success: bool,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,48 +54,76 @@ pub struct StatusResponse {
     pub email: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct LogoutRequest {
+    pub token: String,
+}
+
+#[derive(Serialize)]
+pub struct LogoutResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct SessionInfo {
+    pub token: String,
+    pub email: String,
+}
+
 /// GET / — Serve the login page
-pub async fn login_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let imap = state.imap.read().await;
-    if imap.is_some() {
-        // Already authenticated, show status
-        return Html(LOGIN_HTML.replace(
-            "<!--STATUS-->",
-            r#"<div class="status success">Connecté avec succès. Le serveur MCP est prêt sur <code>/mcp</code>.</div>"#,
-        ));
-    }
-    Html(LOGIN_HTML.replace("<!--STATUS-->", ""))
+pub async fn login_page() -> impl IntoResponse {
+    Html(LOGIN_HTML)
 }
 
-/// GET /api/status — Check authentication status
-pub async fn api_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
-    let imap = state.imap.read().await;
-    if imap.is_some() {
-        let config = state.config.read().await;
-        Json(StatusResponse {
-            authenticated: true,
-            email: Some(config.email.clone()),
-        })
-    } else {
-        Json(StatusResponse {
-            authenticated: false,
-            email: None,
-        })
+/// GET /api/status?token=xxx — Check authentication status for a given token
+pub async fn api_status(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<StatusResponse> {
+    if let Some(token) = params.get("token") {
+        if let Some(email) = state.sessions.get_email(token).await {
+            return Json(StatusResponse {
+                authenticated: true,
+                email: Some(email),
+            });
+        }
     }
+    Json(StatusResponse {
+        authenticated: false,
+        email: None,
+    })
 }
 
-/// POST /api/login — Test credentials and configure the server
+/// GET /api/sessions — List all active sessions
+pub async fn api_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<SessionInfo>> {
+    let sessions = state.sessions.list().await;
+    Json(
+        sessions
+            .into_iter()
+            .map(|(token, email)| SessionInfo {
+                token: format!("{}...{}", &token[..8], &token[token.len() - 4..]),
+                email,
+            })
+            .collect(),
+    )
+}
+
+/// POST /api/login — Test credentials and create a user session
 pub async fn api_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> (StatusCode, Json<LoginResponse>) {
-    // Validate input
     if req.email.is_empty() || req.password.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(LoginResponse {
                 success: false,
                 message: "Email et mot de passe requis.".to_string(),
+                token: None,
+                mcp_url: None,
             }),
         );
     }
@@ -115,9 +148,7 @@ pub async fn api_login(
     let test_result = tokio::task::spawn_blocking(move || {
         let tls = native_tls::TlsConnector::new()?;
         let client = imap::connect((&*host, port), &host, &tls)?;
-        let mut session = client
-            .login(&username, &password)
-            .map_err(|(e, _)| e)?;
+        let mut session = client.login(&username, &password).map_err(|(e, _)| e)?;
         session.logout()?;
         Ok::<(), anyhow::Error>(())
     })
@@ -125,7 +156,7 @@ pub async fn api_login(
 
     match test_result {
         Ok(Ok(())) => {
-            // Connection successful — update state
+            // Connection successful — create user session
             let auth: Arc<dyn AuthProvider> = Arc::new(BasicAuthProvider::new(
                 req.email.clone(),
                 req.password.clone(),
@@ -134,44 +165,57 @@ pub async fn api_login(
 
             let imap_client = Arc::new(ImapClient::new(auth, imap_host.clone(), imap_port));
 
-            {
-                let mut imap_lock = state.imap.write().await;
-                *imap_lock = Some(imap_client);
-            }
+            let token = uuid::Uuid::new_v4().to_string();
 
-            // Update config
-            {
-                let mut config = state.config.write().await;
-                config.auth_method = "basic".to_string();
-                config.email = req.email.clone();
-                config.username = Some(req.email.clone());
-                config.password = Some(req.password.clone());
-                config.imap_host = imap_host;
-                config.imap_port = imap_port;
+            state
+                .sessions
+                .insert(
+                    token.clone(),
+                    UserSession {
+                        email: req.email.clone(),
+                        imap: imap_client,
+                        imap_host,
+                        imap_port,
+                    },
+                )
+                .await;
 
-                // Save config to disk
-                if let Err(e) = save_config(&config) {
-                    tracing::warn!("Could not save config to disk: {e}");
-                }
-            }
+            // Build the MCP URL
+            let config = state.config.read().await;
+            let base_host = if config.sse_host == "0.0.0.0" {
+                "YOUR_SERVER_HOST".to_string()
+            } else {
+                config.sse_host.clone()
+            };
+            let mcp_url = format!(
+                "http://{}:{}/mcp?token={}",
+                base_host, config.sse_port, token
+            );
 
-            tracing::info!("User {} authenticated via login page", req.email);
+            tracing::info!("User {} authenticated, token: {}...{}", req.email, &token[..8], &token[token.len()-4..]);
 
             (
                 StatusCode::OK,
                 Json(LoginResponse {
                     success: true,
-                    message: format!("Connexion réussie pour {}. Le serveur MCP est prêt.", req.email),
+                    message: format!(
+                        "Connexion réussie pour {}.",
+                        req.email
+                    ),
+                    token: Some(token),
+                    mcp_url: Some(mcp_url),
                 }),
             )
         }
         Ok(Err(e)) => {
-            tracing::warn!("Login failed: {e}");
+            tracing::warn!("Login failed for {}: {e}", req.email);
             (
                 StatusCode::UNAUTHORIZED,
                 Json(LoginResponse {
                     success: false,
                     message: format!("Échec de connexion : {e}"),
+                    token: None,
+                    mcp_url: None,
                 }),
             )
         }
@@ -182,28 +226,64 @@ pub async fn api_login(
                 Json(LoginResponse {
                     success: false,
                     message: "Erreur interne du serveur.".to_string(),
+                    token: None,
+                    mcp_url: None,
                 }),
             )
         }
     }
 }
 
+/// POST /api/logout — Remove a user session
+pub async fn api_logout(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LogoutRequest>,
+) -> Json<LogoutResponse> {
+    if let Some(session) = state.sessions.remove(&req.token).await {
+        tracing::info!("User {} logged out", session.email);
+        Json(LogoutResponse {
+            success: true,
+            message: "Déconnexion réussie.".to_string(),
+        })
+    } else {
+        Json(LogoutResponse {
+            success: false,
+            message: "Session introuvable.".to_string(),
+        })
+    }
+}
+
 /// GET /favicon.ico — Return empty response to avoid 404
 pub async fn favicon() -> impl IntoResponse {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "image/x-icon".parse().unwrap());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "image/x-icon".parse().unwrap(),
+    );
     (StatusCode::OK, headers, &[] as &[u8])
 }
 
-fn save_config(config: &Config) -> anyhow::Result<()> {
-    let config_path = Config::config_path();
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Extract authentication token from an HTTP request (query param or Authorization header).
+pub fn extract_token<B>(req: &http::Request<B>) -> Option<String> {
+    // 1. Try Authorization: Bearer <token>
+    if let Some(auth) = req.headers().get("authorization") {
+        if let Ok(val) = auth.to_str() {
+            if let Some(token) = val.strip_prefix("Bearer ") {
+                return Some(token.to_string());
+            }
+        }
     }
-    let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&config_path, json)?;
-    tracing::info!("Config saved to {}", config_path.display());
-    Ok(())
+
+    // 2. Try query parameter ?token=<token>
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some(token) = pair.strip_prefix("token=") {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 const LOGIN_HTML: &str = r##"<!DOCTYPE html>
@@ -225,7 +305,7 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
         }
         .container {
             width: 100%;
-            max-width: 420px;
+            max-width: 520px;
             padding: 2rem;
         }
         .card {
@@ -307,6 +387,16 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
             background: #475569;
             cursor: not-allowed;
         }
+        .btn-secondary {
+            background: #475569;
+            margin-top: 0.5rem;
+        }
+        .btn-secondary:hover { background: #64748b; }
+        .btn-danger {
+            background: #dc2626;
+            margin-top: 0.5rem;
+        }
+        .btn-danger:hover { background: #b91c1c; }
         .status {
             margin-top: 1rem;
             padding: 0.75rem;
@@ -330,6 +420,35 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
             border-radius: 4px;
             font-size: 0.8125rem;
         }
+        .token-box {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 8px;
+        }
+        .token-box h3 {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-bottom: 0.5rem;
+        }
+        .token-box .url-field {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .token-box input[readonly] {
+            flex: 1;
+            background: #1e293b;
+            border-color: #475569;
+            font-family: monospace;
+            font-size: 0.8125rem;
+        }
+        .copy-btn {
+            width: auto;
+            padding: 0.625rem 1rem;
+            font-size: 0.8125rem;
+        }
         .spinner {
             display: inline-block;
             width: 1rem;
@@ -342,6 +461,29 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
             margin-right: 0.5rem;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .sessions-list {
+            margin-top: 1.5rem;
+            padding-top: 1rem;
+            border-top: 1px solid #334155;
+        }
+        .sessions-list h3 {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-bottom: 0.5rem;
+        }
+        .session-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            font-size: 0.8125rem;
+            color: #cbd5e1;
+            border-bottom: 1px solid #1e293b;
+        }
+        .session-item code {
+            color: #64748b;
+            font-size: 0.75rem;
+        }
     </style>
 </head>
 <body>
@@ -349,10 +491,8 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
         <div class="card">
             <div class="logo">
                 <h1>Exchange MCP</h1>
-                <p>Connexion au serveur de messagerie</p>
+                <p>Connexion multi-utilisateur au serveur de messagerie</p>
             </div>
-
-            <!--STATUS-->
 
             <form id="loginForm">
                 <div class="form-group">
@@ -365,7 +505,7 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
                 </div>
 
                 <div class="advanced-toggle" onclick="toggleAdvanced()">
-                    <span class="arrow" id="advArrow">▶</span> Paramètres avancés
+                    <span class="arrow" id="advArrow">&#9654;</span> Parametres avances
                 </div>
                 <div class="advanced-fields" id="advFields">
                     <div class="form-group">
@@ -382,10 +522,18 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
             </form>
 
             <div id="result"></div>
+            <div id="tokenSection" style="display: none;"></div>
+
+            <div class="sessions-list" id="sessionsSection">
+                <h3>Sessions actives</h3>
+                <div id="sessionsList"><em style="color: #64748b; font-size: 0.8125rem;">Aucune session active</em></div>
+            </div>
         </div>
     </div>
 
     <script>
+        let currentToken = null;
+
         function toggleAdvanced() {
             const fields = document.getElementById('advFields');
             const arrow = document.getElementById('advArrow');
@@ -393,14 +541,60 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
             arrow.classList.toggle('open');
         }
 
+        async function copyToClipboard(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            }
+        }
+
+        async function loadSessions() {
+            try {
+                const res = await fetch('/api/sessions');
+                const sessions = await res.json();
+                const list = document.getElementById('sessionsList');
+                if (sessions.length === 0) {
+                    list.innerHTML = '<em style="color: #64748b; font-size: 0.8125rem;">Aucune session active</em>';
+                } else {
+                    list.innerHTML = sessions.map(s =>
+                        '<div class="session-item"><span>' + s.email + '</span> <code>' + s.token + '</code></div>'
+                    ).join('');
+                }
+            } catch {}
+        }
+
+        async function logout(token) {
+            try {
+                await fetch('/api/logout', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token }),
+                });
+                currentToken = null;
+                document.getElementById('tokenSection').style.display = 'none';
+                document.getElementById('result').innerHTML = '<div class="status success">Deconnexion reussie.</div>';
+                loadSessions();
+            } catch (err) {
+                document.getElementById('result').innerHTML = '<div class="status error">Erreur : ' + err.message + '</div>';
+            }
+        }
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const btn = document.getElementById('submitBtn');
             const result = document.getElementById('result');
+            const tokenSection = document.getElementById('tokenSection');
 
             btn.disabled = true;
-            btn.innerHTML = '<span class="spinner"></span>Connexion en cours…';
+            btn.innerHTML = '<span class="spinner"></span>Connexion en cours...';
             result.innerHTML = '';
+            tokenSection.style.display = 'none';
 
             const body = {
                 email: document.getElementById('email').value,
@@ -418,17 +612,41 @@ const LOGIN_HTML: &str = r##"<!DOCTYPE html>
                 const data = await res.json();
 
                 if (data.success) {
+                    currentToken = data.token;
                     result.innerHTML = '<div class="status success">' + data.message + '</div>';
+                    tokenSection.style.display = 'block';
+                    tokenSection.innerHTML = `
+                        <div class="token-box">
+                            <h3>URL MCP (a copier dans votre client IA)</h3>
+                            <div class="url-field">
+                                <input type="text" id="mcpUrl" readonly value="${data.mcp_url}">
+                                <button class="copy-btn" onclick="copyToClipboard(document.getElementById('mcpUrl').value)">Copier</button>
+                            </div>
+                            <h3>Token d'authentification</h3>
+                            <div class="url-field">
+                                <input type="text" id="tokenValue" readonly value="${data.token}">
+                                <button class="copy-btn" onclick="copyToClipboard(document.getElementById('tokenValue').value)">Copier</button>
+                            </div>
+                            <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 0.5rem;">
+                                Configurez votre client MCP avec cette URL. Le token identifie votre session.
+                            </p>
+                            <button class="btn-danger" onclick="logout('${data.token}')">Se deconnecter</button>
+                        </div>
+                    `;
+                    loadSessions();
                 } else {
                     result.innerHTML = '<div class="status error">' + data.message + '</div>';
                 }
             } catch (err) {
-                result.innerHTML = '<div class="status error">Erreur réseau : ' + err.message + '</div>';
+                result.innerHTML = '<div class="status error">Erreur reseau : ' + err.message + '</div>';
             }
 
             btn.disabled = false;
             btn.textContent = 'Se connecter';
         });
+
+        // Load sessions on page load
+        loadSessions();
     </script>
 </body>
 </html>

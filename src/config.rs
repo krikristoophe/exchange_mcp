@@ -23,7 +23,8 @@ pub struct Config {
     /// Password for IMAP/SMTP login
     pub password: Option<String>,
 
-    /// Email address of the user
+    /// Email address of the user (optional in HTTP multi-user mode)
+    #[serde(default)]
     pub email: String,
     /// IMAP server hostname (default: outlook.office365.com)
     #[serde(default = "default_imap_host")]
@@ -129,8 +130,7 @@ impl Config {
             client_secret: std::env::var("EXCHANGE_CLIENT_SECRET").ok(),
             username: std::env::var("EXCHANGE_USERNAME").ok(),
             password: std::env::var("EXCHANGE_PASSWORD").ok(),
-            email: std::env::var("EXCHANGE_EMAIL")
-                .map_err(|_| anyhow::anyhow!("EXCHANGE_EMAIL not set"))?,
+            email: std::env::var("EXCHANGE_EMAIL").unwrap_or_default(),
             imap_host: std::env::var("EXCHANGE_IMAP_HOST")
                 .unwrap_or_else(|_| default_imap_host()),
             imap_port: std::env::var("EXCHANGE_IMAP_PORT")

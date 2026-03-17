@@ -4,6 +4,7 @@ mod imap_client;
 mod login;
 mod oauth;
 mod server;
+mod session;
 
 use std::sync::Arc;
 
@@ -18,10 +19,15 @@ use crate::imap_client::ImapClient;
 use crate::login::AppState;
 use crate::oauth::OAuthManager;
 use crate::server::ExchangeMcpServer;
+use crate::session::SessionStore;
+
+tokio::task_local! {
+    /// The current user's session token, set by the MCP auth middleware.
+    pub static CURRENT_USER_TOKEN: String;
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging to stderr (stdout is used for MCP stdio transport)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -31,15 +37,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting Exchange MCP Server");
 
-    // Load configuration
     let config = Config::load()?;
 
     match config.transport.as_str() {
         "http" => {
-            // In HTTP mode, try to set up auth but allow starting without it
-            // (login page will handle authentication)
-            let imap = try_create_imap_client(&config).await;
-            start_http_server(imap, config).await?;
+            start_http_server(config).await?;
         }
         _ => {
             // stdio mode requires auth to be configured upfront
@@ -52,26 +54,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Try to create an IMAP client from config. Returns None if auth is not configured.
-async fn try_create_imap_client(config: &Config) -> Option<Arc<ImapClient>> {
-    match create_imap_client(config).await {
-        Ok(imap) => {
-            tracing::info!("Auth pre-configured, IMAP client ready");
-            Some(imap)
-        }
-        Err(e) => {
-            tracing::info!("Auth not pre-configured ({e}), login page will be available at /");
-            None
-        }
-    }
-}
-
-/// Create an IMAP client from config, returning an error if auth is not configured.
 async fn create_imap_client(config: &Config) -> Result<Arc<ImapClient>> {
     let auth_provider: Arc<dyn AuthProvider> = match config.auth_method.as_str() {
         "basic" => {
             let username = config.username.clone().unwrap_or_else(|| config.email.clone());
-            let password = config.password.clone()
+            let password = config
+                .password
+                .clone()
                 .ok_or_else(|| anyhow::anyhow!("password is required for basic auth"))?;
             tracing::info!("Using basic (login/password) authentication");
             Arc::new(BasicAuthProvider::new(username, password, config.email.clone()))
@@ -104,7 +93,7 @@ async fn start_stdio_server(server: ExchangeMcpServer) -> Result<()> {
     Ok(())
 }
 
-async fn start_http_server(imap: Option<Arc<ImapClient>>, config: Config) -> Result<()> {
+async fn start_http_server(config: Config) -> Result<()> {
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService,
         session::local::LocalSessionManager,
@@ -112,47 +101,119 @@ async fn start_http_server(imap: Option<Arc<ImapClient>>, config: Config) -> Res
     };
 
     let addr = format!("{}:{}", config.sse_host, config.sse_port);
-    tracing::info!("Starting MCP Streamable HTTP server on {addr}");
+    tracing::info!("Starting MCP Streamable HTTP server on {addr} (multi-user mode)");
+
+    let session_store = Arc::new(SessionStore::new());
 
     let app_state = Arc::new(AppState {
-        imap: RwLock::new(imap),
+        sessions: session_store.clone(),
         config: RwLock::new(config),
     });
 
-    // MCP service — uses a closure that reads the current IMAP client from state
-    let state_for_mcp = app_state.clone();
+    // MCP service — the factory reads CURRENT_USER_TOKEN task-local
+    // to determine which user's IMAP client to use.
+    let sessions_for_mcp = session_store.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let server_config = StreamableHttpServerConfig::default();
 
     let mcp_service = StreamableHttpService::new(
         move || {
-            let state = state_for_mcp.clone();
-            // We need to get the imap client synchronously here.
-            // Use try_read to avoid blocking; if not available, return error.
-            let imap_guard = state.imap.blocking_read();
-            match imap_guard.as_ref() {
-                Some(imap) => Ok(ExchangeMcpServer::new(imap.clone())),
-                None => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Not authenticated. Please visit the login page at / first.")),
+            let token = CURRENT_USER_TOKEN.try_with(|t| t.clone()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Not authenticated. Add ?token=YOUR_TOKEN to the MCP URL.",
+                )
+            })?;
+
+            let sessions = sessions_for_mcp.clone();
+            // Use blocking_read since we're in a sync context inside the factory
+            let guard = sessions.sessions_blocking_read();
+            match guard.get(&token) {
+                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Invalid or expired session token.",
+                )),
             }
         },
         session_manager,
         server_config,
     );
 
-    // Build the router with login routes + MCP
+    // Wrap MCP service with auth middleware that sets the task-local token
+    let auth_mcp = AuthMcpService {
+        inner: mcp_service,
+        sessions: session_store,
+    };
+
     let router = axum::Router::new()
         .route("/", axum::routing::get(login::login_page))
         .route("/api/login", axum::routing::post(login::api_login))
+        .route("/api/logout", axum::routing::post(login::api_logout))
         .route("/api/status", axum::routing::get(login::api_status))
+        .route("/api/sessions", axum::routing::get(login::api_sessions))
         .route("/favicon.ico", axum::routing::get(login::favicon))
         .with_state(app_state)
-        .nest_service("/mcp", mcp_service);
+        .nest_service("/mcp", auth_mcp);
 
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Login page:  http://{addr}/");
-    tracing::info!("MCP endpoint: http://{addr}/mcp");
+    tracing::info!("Login page:   http://{addr}/");
+    tracing::info!("MCP endpoint: http://{addr}/mcp?token=YOUR_TOKEN");
 
     axum::serve(tcp_listener, router).await?;
 
     Ok(())
 }
+
+/// Tower Service wrapper that extracts the auth token from the request
+/// and sets the CURRENT_USER_TOKEN task-local before delegating to the inner MCP service.
+#[derive(Clone)]
+struct AuthMcpService<S> {
+    inner: S,
+    sessions: Arc<SessionStore>,
+}
+
+impl<S, B> tower::Service<http::Request<B>> for AuthMcpService<S>
+where
+    S: tower::Service<http::Request<B>> + Clone + Send + 'static,
+    S::Response: IntoMcpResponse + Send + 'static,
+    S::Error: Send + 'static,
+    S::Future: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+        let token = login::extract_token(&req);
+        let mut inner = self.inner.clone();
+        // Swap the ready service into inner (standard tower pattern)
+        std::mem::swap(&mut self.inner, &mut inner);
+
+        match token {
+            Some(t) => {
+                Box::pin(CURRENT_USER_TOKEN.scope(t, async move { inner.call(req).await }))
+            }
+            None => {
+                // No token — still call the service, it will fail in the factory
+                // with a clear error message
+                Box::pin(async move { inner.call(req).await })
+            }
+        }
+    }
+}
+
+/// Marker trait — we need S::Response to be the correct type.
+/// In practice, StreamableHttpService returns http::Response<Body>.
+trait IntoMcpResponse {}
+impl<T> IntoMcpResponse for http::Response<T> {}

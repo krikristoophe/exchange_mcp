@@ -96,7 +96,7 @@ impl OAuth2Store {
         }
     }
 
-    // ── Client registration ──────────────────────────────────────────
+    // -- Client registration --
 
     pub fn register_client(&self, client: &RegisteredClient) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -130,7 +130,7 @@ impl OAuth2Store {
         }
     }
 
-    // ── Authorization codes ──────────────────────────────────────────
+    // -- Authorization codes --
 
     pub fn store_auth_code(&self, code: &AuthCode) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -185,7 +185,7 @@ impl OAuth2Store {
         }
     }
 
-    // ── Tokens ───────────────────────────────────────────────────────
+    // -- Tokens --
 
     pub fn store_token(&self, token: &StoredToken) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();

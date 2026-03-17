@@ -1,14 +1,4 @@
-//! OAuth 2.1 Authorization Server for MCP.
-//!
-//! Implements the endpoints required by the MCP spec so that Claude Web
-//! (and any other MCP client) can authenticate using OAuth 2.1 + PKCE:
-//!
-//! - `GET  /.well-known/oauth-protected-resource`  (RFC 9728)
-//! - `GET  /.well-known/oauth-authorization-server` (RFC 8414)
-//! - `POST /oauth/register`   — Dynamic Client Registration (RFC 7591)
-//! - `GET  /oauth/authorize`  — Authorization endpoint (shows login form)
-//! - `POST /oauth/authorize`  — Authorization endpoint (processes login)
-//! - `POST /oauth/token`      — Token endpoint (code exchange + refresh)
+//! OAuth 2.1 HTTP handlers: metadata, registration, authorization, and token exchange.
 
 use std::sync::Arc;
 
@@ -22,18 +12,12 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::config::{DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT};
-use crate::imap_client::ImapClient;
-use crate::oauth2_store::{AuthCode, OAuth2Store, RegisteredClient, StoredToken};
-use crate::session::{SessionStore, UserSession};
+use crate::imap::ImapClient;
+use crate::session::UserSession;
+use super::store::{AuthCode, RegisteredClient, StoredToken};
+use super::OAuth2State;
 
-/// Shared state for OAuth2 endpoints.
-pub struct OAuth2State {
-    pub store: Arc<OAuth2Store>,
-    pub sessions: Arc<SessionStore>,
-    pub issuer: String,
-}
-
-// ── Helper: generate a random URL-safe token ────────────────────────────
+// -- Helper: generate a random URL-safe token --
 
 fn random_token(len: usize) -> String {
     use rand::Rng;
@@ -41,7 +25,7 @@ fn random_token(len: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
 }
 
-// ── Protected Resource Metadata (RFC 9728) ──────────────────────────────
+// -- Protected Resource Metadata (RFC 9728) --
 
 #[derive(Serialize)]
 struct ProtectedResourceMetadata {
@@ -68,7 +52,7 @@ pub async fn protected_resource_metadata(
     )
 }
 
-// ── Authorization Server Metadata (RFC 8414) ────────────────────────────
+// -- Authorization Server Metadata (RFC 8414) --
 
 #[derive(Serialize)]
 struct AuthServerMetadata {
@@ -110,7 +94,7 @@ pub async fn authorization_server_metadata(
     )
 }
 
-// ── Dynamic Client Registration (RFC 7591) ──────────────────────────────
+// -- Dynamic Client Registration (RFC 7591) --
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -198,7 +182,7 @@ pub async fn register_client(
     )
 }
 
-// ── Authorization endpoint ──────────────────────────────────────────────
+// -- Authorization endpoint --
 
 #[derive(Deserialize)]
 pub struct AuthorizeParams {
@@ -405,7 +389,7 @@ pub struct AuthorizeFormData {
     pub state: String,
 }
 
-// ── Token endpoint ──────────────────────────────────────────────────────
+// -- Token endpoint --
 
 #[derive(Deserialize)]
 pub struct TokenRequest {
@@ -667,7 +651,7 @@ async fn handle_refresh(state: Arc<OAuth2State>, req: TokenRequest) -> axum::res
     (StatusCode::OK, Json(serde_json::json!(resp))).into_response()
 }
 
-// ── PKCE verification ───────────────────────────────────────────────────
+// -- PKCE verification --
 
 fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool {
     match method {
@@ -682,7 +666,7 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// -- Helpers --
 
 fn urlencod(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
@@ -707,7 +691,7 @@ fn error_redirect(
     Redirect::to(&url)
 }
 
-// ── Authorize HTML form ─────────────────────────────────────────────────
+// -- Authorize HTML form --
 
 fn authorize_html(
     client_id: &str,

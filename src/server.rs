@@ -8,7 +8,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
-use crate::imap_client::ImapClient;
+use crate::imap::ImapClient;
 
 #[derive(Clone)]
 pub struct ExchangeMcpServer {
@@ -128,7 +128,7 @@ impl ExchangeMcpServer {
                 // If no plain text body but HTML exists, convert HTML to text
                 if email.body_text.is_empty() || email.body_text == "(no body)" {
                     if let Some(ref html) = email.body_html {
-                        email.body_text = crate::imap_client::html_to_text(html);
+                        email.body_text = crate::imap::html_to_text(html);
                     }
                 }
                 serde_json::to_string_pretty(&email).unwrap_or_else(|e| e.to_string())

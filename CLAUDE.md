@@ -21,15 +21,20 @@ Dockerfile              # Multi-stage build (builder + runtime debian-slim)
 docker-compose.yml      # Stack complete avec volume persistant ./data
 .env.example            # Variables d'environnement (a copier en .env)
 src/
-├── main.rs             # Point d'entree + AuthMcpService (middleware Tower)
+├── main.rs             # Point d'entree, demarrage serveur HTTP
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
 ├── server.rs           # ExchangeMcpServer + 10 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
-├── oauth2_server.rs    # Serveur OAuth 2.1 (metadata, register, authorize, token)
-├── oauth2_store.rs     # SQLite store (clients, auth codes, tokens)
-├── imap_client.rs      # ImapClient — toutes les operations IMAP
+├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token
 ├── session.rs          # SessionStore — HashMap<token, UserSession>
-└── login.rs            # extract_bearer_token() + favicon handler
+├── oauth/
+│   ├── mod.rs          # OAuth2State + re-exports
+│   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
+│   └── store.rs        # Store SQLite (clients, auth codes, tokens)
+└── imap/
+    ├── mod.rs          # Re-exports (ImapClient, html_to_text)
+    ├── client.rs       # ImapClient — connexion, lecture, recherche, flags
+    └── parse.rs        # Parsing email (MIME, RFC 2047, HTML-to-text)
 ```
 
 ## Flux de donnees

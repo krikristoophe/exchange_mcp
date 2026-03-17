@@ -96,7 +96,7 @@ impl Config {
         }
     }
 
-    fn config_path() -> PathBuf {
+    pub fn config_path() -> PathBuf {
         if let Ok(path) = std::env::var("EXCHANGE_MCP_CONFIG") {
             PathBuf::from(path)
         } else {

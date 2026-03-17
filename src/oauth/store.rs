@@ -86,6 +86,11 @@ impl OAuth2Store {
                 imap_host       TEXT NOT NULL,
                 imap_port       INTEGER NOT NULL,
                 created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS csrf_tokens (
+                token       TEXT PRIMARY KEY,
+                expires_at  INTEGER NOT NULL
             );",
         )?;
 
@@ -159,39 +164,52 @@ impl OAuth2Store {
         Ok(())
     }
 
-    /// Consume an auth code (mark as used). Returns None if already used, expired, or not found.
+    /// Consume an auth code (mark as used) atomically with an IMMEDIATE transaction.
+    /// Returns None if already used, expired, or not found.
     pub fn consume_auth_code(&self, code: &str) -> anyhow::Result<Option<AuthCode>> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
 
-        let mut stmt = conn.prepare(
-            "SELECT code, client_id, redirect_uri, code_challenge, code_challenge_method, session_token, expires_at
-             FROM oauth_auth_codes WHERE code = ?1 AND used = 0 AND expires_at > ?2",
-        )?;
-        let mut rows = stmt.query(params![code, now])?;
+        // Use IMMEDIATE transaction to prevent TOCTOU race conditions
+        conn.execute_batch("BEGIN IMMEDIATE")?;
 
-        match rows.next()? {
-            Some(row) => {
-                let auth_code = AuthCode {
-                    code: row.get(0)?,
-                    client_id: row.get(1)?,
-                    redirect_uri: row.get(2)?,
-                    code_challenge: row.get(3)?,
-                    code_challenge_method: row.get(4)?,
-                    session_token: row.get(5)?,
-                    expires_at: row.get(6)?,
-                };
-                drop(rows);
-                drop(stmt);
-                // Mark as used
-                conn.execute(
-                    "UPDATE oauth_auth_codes SET used = 1 WHERE code = ?1",
-                    params![code],
-                )?;
-                Ok(Some(auth_code))
+        let result = (|| -> anyhow::Result<Option<AuthCode>> {
+            let mut stmt = conn.prepare(
+                "SELECT code, client_id, redirect_uri, code_challenge, code_challenge_method, session_token, expires_at
+                 FROM oauth_auth_codes WHERE code = ?1 AND used = 0 AND expires_at > ?2",
+            )?;
+            let mut rows = stmt.query(params![code, now])?;
+
+            match rows.next()? {
+                Some(row) => {
+                    let auth_code = AuthCode {
+                        code: row.get(0)?,
+                        client_id: row.get(1)?,
+                        redirect_uri: row.get(2)?,
+                        code_challenge: row.get(3)?,
+                        code_challenge_method: row.get(4)?,
+                        session_token: row.get(5)?,
+                        expires_at: row.get(6)?,
+                    };
+                    drop(rows);
+                    drop(stmt);
+                    // Mark as used atomically within the same transaction
+                    conn.execute(
+                        "UPDATE oauth_auth_codes SET used = 1 WHERE code = ?1",
+                        params![code],
+                    )?;
+                    Ok(Some(auth_code))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
+        })();
+
+        match &result {
+            Ok(_) => conn.execute_batch("COMMIT")?,
+            Err(_) => { let _ = conn.execute_batch("ROLLBACK"); }
         }
+
+        result
     }
 
     // -- Tokens --
@@ -396,6 +414,33 @@ impl OAuth2Store {
             params![session_token],
         )?;
         Ok(())
+    }
+
+    // -- CSRF tokens --
+
+    /// Store a CSRF token with 10-minute expiry.
+    pub fn store_csrf_token(&self, token: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let expires_at = chrono::Utc::now().timestamp() + 600;
+        // Clean up expired CSRF tokens opportunistically
+        let now = chrono::Utc::now().timestamp();
+        let _ = conn.execute("DELETE FROM csrf_tokens WHERE expires_at <= ?1", params![now]);
+        conn.execute(
+            "INSERT INTO csrf_tokens (token, expires_at) VALUES (?1, ?2)",
+            params![token, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Consume (verify and delete) a CSRF token. Returns true if valid.
+    pub fn consume_csrf_token(&self, token: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let deleted = conn.execute(
+            "DELETE FROM csrf_tokens WHERE token = ?1 AND expires_at > ?2",
+            params![token, now],
+        )?;
+        Ok(deleted > 0)
     }
 }
 

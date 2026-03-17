@@ -28,7 +28,7 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
-├── server.rs           # ExchangeMcpServer + 22 outils MCP + resources UI (MCP Apps)
+├── server.rs           # ExchangeMcpServer + 25 outils MCP + resources UI (MCP Apps)
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -106,7 +106,7 @@ Client MCP
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
 - Une tache periodique (toutes les 5 min) nettoie les sessions expirees et les tokens/codes orphelins
 - `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus
-- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread, create_draft, update_draft, send, reply, forward)
+- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread, create_draft, update_draft, send, reply, forward, create_folder, rename_folder, delete_folder)
 - Les outils create_draft, update_draft, send_draft, send_email, reply, forward retournent l'UID du message cree/envoye (JSON avec message + uid + folder)
 - `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
 - Les mots de passe existants en clair sont migres automatiquement (detection via `is_encrypted()`) lors de la lecture

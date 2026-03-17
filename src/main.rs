@@ -77,6 +77,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                         imap: imap_client,
                         imap_host: ps.imap_host,
                         imap_port: ps.imap_port,
+                        last_activity: chrono::Utc::now().timestamp(),
                     },
                 );
                 restored_tokens.push(ps.session_token);
@@ -101,6 +102,30 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         default_imap_port: config.imap_port,
     });
 
+    // Periodic cleanup task — runs every 5 minutes
+    {
+        let sessions = session_store.clone();
+        let store = oauth2_store.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                // Clean expired sessions
+                let expired = sessions.cleanup_expired();
+                if !expired.is_empty() {
+                    tracing::info!("Cleaned up {} expired session(s)", expired.len());
+                    // Clean associated tokens and persisted sessions
+                    for token in &expired {
+                        let _ = store.delete_session(token);
+                    }
+                }
+                // Clean expired tokens and codes
+                let valid = sessions.session_tokens();
+                let _ = store.cleanup_orphaned_tokens(&valid);
+            }
+        });
+    }
+
     // MCP service — the factory reads CURRENT_USER_TOKEN task-local
     // to determine which user's IMAP client to use.
     let sessions_for_mcp = session_store.clone();
@@ -117,6 +142,8 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             })?;
 
             let sessions = sessions_for_mcp.clone();
+            // Touch session to update last activity
+            sessions.touch(&token);
             let guard = sessions.sessions_read();
             match guard.get(&token) {
                 Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
@@ -163,7 +190,13 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             "/oauth/token",
             axum::routing::post(oauth::endpoints::token_endpoint),
         )
+        .route(
+            "/oauth/revoke",
+            axum::routing::post(oauth::endpoints::revoke_token),
+        )
         .with_state(oauth2_state)
+        // Security headers middleware
+        .layer(axum::middleware::from_fn(middleware::security_headers))
         // MCP endpoint (with auth middleware)
         .nest_service("/mcp", auth_mcp);
 

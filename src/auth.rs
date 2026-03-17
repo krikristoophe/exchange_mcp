@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Credentials needed to authenticate an IMAP session.
 pub struct ImapCredentials {
@@ -14,6 +15,8 @@ pub trait AuthProvider: Send + Sync {
 }
 
 /// Basic (username/password) auth provider for IMAP servers.
+/// Credentials are zeroized from memory when dropped.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct BasicAuthProvider {
     username: String,
     password: String,

@@ -14,6 +14,8 @@ OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 - **rusqlite** v0.34 (bundled) — stockage OAuth2
 - **tower** v0.5 — middleware de service
 - **aes-gcm** v0.10 — chiffrement AES-256-GCM des credentials
+- **subtle** v2.6 — comparaisons constant-time (secrets OAuth, PKCE)
+- **zeroize** v1 — nettoyage securise des credentials en memoire
 - **encoding_rs** v0.8 — conversion charset (RFC 2047 : iso-8859-1, windows-1252, etc.)
 
 ## Architecture des fichiers
@@ -23,18 +25,18 @@ Dockerfile              # Multi-stage build (builder + runtime debian-slim)
 docker-compose.yml      # Stack complete avec volume persistant ./data
 .env.example            # Variables d'environnement (a copier en .env)
 src/
-├── main.rs             # Point d'entree, demarrage serveur HTTP
+├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
 ├── server.rs           # ExchangeMcpServer + 11 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
-├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token
-├── session.rs          # SessionStore — HashMap<token, UserSession>
+├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token + security headers
+├── session.rs          # SessionStore — HashMap<token, UserSession> avec timeout
 ├── oauth/
 │   ├── mod.rs          # OAuth2State + re-exports
-│   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
-│   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions chiffrees)
+│   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token, revoke)
+│   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions, CSRF tokens)
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
     ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache
@@ -51,6 +53,7 @@ Client MCP
   → GET /oauth/authorize (formulaire login IMAP)
   → POST /oauth/authorize (test IMAP → session + auth code)
   → POST /oauth/token (code + PKCE → access_token)
+  → POST /oauth/revoke (revocation de token, RFC 7009)
   → GET /mcp + Authorization: Bearer <access_token>
       → AuthMcpService resout access_token → session_token
       → CURRENT_USER_TOKEN task-local
@@ -64,19 +67,30 @@ Client MCP
 - **Langue de l'UI** : francais (messages d'erreur utilisateur, formulaires HTML)
 - **Gestion d'erreur** : `anyhow::Result` partout, pas de `unwrap()` sur du code faillible
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
-- **Tokens** : generes via `base64(random_bytes)` URL-safe sans padding
-- **Sessions** : UUID v4 comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts
-- **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite. Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`
+- **Tokens** : generes via `base64(random_bytes(32))` URL-safe sans padding (256 bits)
+- **Sessions** : token aleatoire 256 bits comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts. Timeout d'inactivite de 8h avec nettoyage periodique (toutes les 5 min)
+- **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite, zeroizes en memoire au drop (`ZeroizeOnDrop`). Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`
 - **Auth** : uniquement login/password IMAP (pas d'OAuth2 Microsoft cote IMAP)
 - **Cache** : cache en memoire par utilisateur avec TTL (dossiers 5min, listes 2min, details 10min, statut 1min). Invalide automatiquement lors des operations d'ecriture
+- **Securite** :
+  - Comparaisons constant-time (`subtle::ConstantTimeEq`) pour client_secret et PKCE
+  - Protection CSRF sur le formulaire d'autorisation (token unique consommable, 10 min d'expiration)
+  - Headers HTTP securite : `X-Content-Type-Options`, `X-Frame-Options`, `CSP`, `HSTS`, `Referrer-Policy`, `X-XSS-Protection`
+  - Validation SSRF : blocage des IPs internes/localhost pour le champ IMAP host personnalise
+  - Validation des redirect URIs : seuls les schemes `http` et `https` sont acceptes
+  - Messages d'erreur generiques cote client (pas de fuite d'information IMAP)
+  - Transaction SQLite `IMMEDIATE` pour l'echange d'auth code (anti-replay)
+  - Validation email et port IMAP cote serveur
+  - Revocation de token via `POST /oauth/revoke` (RFC 7009)
 
 ## Points d'attention
 
 - Le crate `imap` est synchrone — ne jamais l'appeler directement dans un contexte async
 - `CURRENT_USER_TOKEN` est un `task_local!` — doit etre scope dans la future avant d'appeler le service MCP
 - `SessionStore::sessions_blocking_read()` est utilise dans la factory MCP (contexte sync) — ne pas remplacer par la version async
-- Les auth codes OAuth expirent en 10 minutes, les access tokens en 1 heure
+- Les auth codes OAuth expirent en 10 minutes, les access tokens en 1 heure, les sessions en 8h d'inactivite
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
+- Une tache periodique (toutes les 5 min) nettoie les sessions expirees et les tokens/codes orphelins
 - `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus
 - Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread)
 - `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
@@ -134,3 +148,4 @@ docker compose down
 - **Pas de mode stdio** — le serveur fonctionne uniquement en HTTP multi-utilisateur.
 - **Pas d'auth OAuth2 Microsoft cote IMAP** — l'auth IMAP est toujours login/password. L'OAuth 2.1 sert uniquement a authentifier les clients MCP.
 - **Tester la compilation** (`cargo build`) avant de commit.
+- **Zero warning** : `cargo check` ne doit produire aucun warning sur le code du projet (les warnings des dependances externes sont acceptables). Utiliser `#[allow(dead_code)]` sur les methodes publiques utilitaires non encore appelees plutot que de les supprimer.

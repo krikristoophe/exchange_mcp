@@ -44,6 +44,10 @@ url = "2"
 # Credential encryption
 aes-gcm = "0.10"
 
+# Security
+subtle = "2.6"
+zeroize = { version = "1", features = ["derive"] }
+
 # Charset conversion (RFC 2047)
 encoding_rs = "0.8"
 

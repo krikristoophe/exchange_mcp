@@ -62,8 +62,9 @@ fn load_or_generate_key() -> Result<[u8; KEY_LEN]> {
 
     // 3. Generate a new key and save it
     let mut key = [0u8; KEY_LEN];
-    use rand::Rng;
-    rand::rng().fill(&mut key);
+    use rand::TryRngCore;
+    rand::rngs::OsRng.try_fill_bytes(&mut key[..])
+        .map_err(|e| anyhow::anyhow!("Failed to generate random key: {e}"))?;
 
     if let Some(parent) = key_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -104,8 +105,9 @@ pub fn encrypt(plaintext: &str) -> Result<String> {
     let cipher = get_cipher()?;
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    use rand::Rng;
-    rand::rng().fill(&mut nonce_bytes);
+    use rand::TryRngCore;
+    rand::rngs::OsRng.try_fill_bytes(&mut nonce_bytes[..])
+        .map_err(|e| anyhow::anyhow!("Failed to generate nonce: {e}"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher

@@ -6,9 +6,32 @@
 
 use std::sync::Arc;
 
+use axum::middleware::Next;
+
 use crate::oauth::store::OAuth2Store;
 use crate::session::SessionStore;
 use crate::CURRENT_USER_TOKEN;
+
+/// Security headers middleware — adds standard security headers to all responses.
+pub async fn security_headers(
+    req: http::Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+    headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+    headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert(
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("Strict-Transport-Security", "max-age=31536000; includeSubDomains".parse().unwrap());
+    response
+}
 
 /// Extract Bearer token from an HTTP request's Authorization header.
 pub fn extract_bearer_token<B>(req: &http::Request<B>) -> Option<String> {

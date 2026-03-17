@@ -10,11 +10,84 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use subtle::ConstantTimeEq;
+
 use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::imap::ImapClient;
 use crate::session::UserSession;
 use super::store::{AuthCode, PersistedSession, RegisteredClient, StoredToken};
 use super::OAuth2State;
+
+/// Allowed redirect URI schemes. Blocks javascript:, data:, etc.
+fn is_valid_redirect_scheme(uri: &str) -> bool {
+    match url::Url::parse(uri) {
+        Ok(u) => matches!(u.scheme(), "https" | "http"),
+        Err(_) => false,
+    }
+}
+
+/// Validate IMAP host to prevent SSRF attacks.
+/// Blocks internal IPs, localhost, and non-hostname values.
+fn is_safe_imap_host(host: &str) -> bool {
+    // Block empty
+    if host.is_empty() {
+        return false;
+    }
+    // Block obvious internal hosts
+    let lower = host.to_lowercase();
+    if lower == "localhost"
+        || lower == "127.0.0.1"
+        || lower == "::1"
+        || lower == "0.0.0.0"
+        || lower.starts_with("10.")
+        || lower.starts_with("192.168.")
+        || lower.starts_with("172.16.")
+        || lower.starts_with("172.17.")
+        || lower.starts_with("172.18.")
+        || lower.starts_with("172.19.")
+        || lower.starts_with("172.2")
+        || lower.starts_with("172.30.")
+        || lower.starts_with("172.31.")
+        || lower.starts_with("169.254.")
+        || lower.starts_with("[")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+    {
+        return false;
+    }
+    // Must contain at least one dot (looks like a hostname)
+    if !host.contains('.') {
+        return false;
+    }
+    true
+}
+
+/// Validate IMAP port (only standard IMAP ports or high ports).
+fn is_valid_imap_port(port: u16) -> bool {
+    matches!(port, 143 | 993 | 995 | 1024..=65535)
+}
+
+/// Basic email format validation (server-side).
+fn is_valid_email(email: &str) -> bool {
+    let parts: Vec<&str> = email.splitn(2, '@').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let (local, domain) = (parts[0], parts[1]);
+    !local.is_empty() && !domain.is_empty() && domain.contains('.')
+}
+
+/// Generate a CSRF token and store it in the OAuth2 store.
+fn generate_csrf_token(store: &super::store::OAuth2Store) -> String {
+    let token = random_token(32);
+    let _ = store.store_csrf_token(&token);
+    token
+}
+
+/// Verify and consume a CSRF token.
+fn verify_csrf_token(store: &super::store::OAuth2Store, token: &str) -> bool {
+    store.consume_csrf_token(token).unwrap_or(false)
+}
 
 // -- Helper: generate a random URL-safe token --
 
@@ -59,6 +132,7 @@ struct AuthServerMetadata {
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: String,
+    revocation_endpoint: String,
     response_types_supported: Vec<String>,
     grant_types_supported: Vec<String>,
     token_endpoint_auth_methods_supported: Vec<String>,
@@ -74,6 +148,7 @@ pub async fn authorization_server_metadata(
         authorization_endpoint: format!("{}/oauth/authorize", state.issuer),
         token_endpoint: format!("{}/oauth/token", state.issuer),
         registration_endpoint: format!("{}/oauth/register", state.issuer),
+        revocation_endpoint: format!("{}/oauth/revoke", state.issuer),
         response_types_supported: vec!["code".to_string()],
         grant_types_supported: vec![
             "authorization_code".to_string(),
@@ -128,12 +203,12 @@ pub async fn register_client(
         );
     }
 
-    // Validate redirect URIs
+    // Validate redirect URIs — must be valid URLs with http(s) scheme only
     for uri in &req.redirect_uris {
-        if url::Url::parse(uri).is_err() {
+        if !is_valid_redirect_scheme(uri) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_redirect_uri", "error_description": format!("Invalid redirect URI: {}", uri)})),
+                Json(serde_json::json!({"error": "invalid_redirect_uri", "error_description": "Redirect URIs must use http or https scheme"})),
             );
         }
     }
@@ -244,6 +319,9 @@ pub async fn authorize_get(
         }
     }
 
+    // Generate CSRF token for form protection
+    let csrf_token = generate_csrf_token(&state.store);
+
     // Render login page with hidden OAuth params
     let html = authorize_html(
         &params.client_id,
@@ -251,6 +329,7 @@ pub async fn authorize_get(
         &params.code_challenge,
         &params.code_challenge_method,
         params.state.as_deref().unwrap_or(""),
+        &csrf_token,
         None,
     );
     Html(html).into_response()
@@ -261,6 +340,11 @@ pub async fn authorize_post(
     State(state): State<Arc<OAuth2State>>,
     axum::extract::Form(form): axum::extract::Form<AuthorizeFormData>,
 ) -> impl IntoResponse {
+    // Verify CSRF token
+    if !verify_csrf_token(&state.store, &form.csrf_token) {
+        return (StatusCode::BAD_REQUEST, "Invalid or expired form submission. Please try again.").into_response();
+    }
+
     // Validate client
     let client = match state.store.get_client(&form.client_id) {
         Ok(Some(c)) => c,
@@ -273,6 +357,17 @@ pub async fn authorize_post(
         return (StatusCode::BAD_REQUEST, "Invalid redirect_uri").into_response();
     }
 
+    // Validate email format server-side
+    if !is_valid_email(&form.email) {
+        let csrf_token = generate_csrf_token(&state.store);
+        let html = authorize_html(
+            &form.client_id, &form.redirect_uri, &form.code_challenge,
+            &form.code_challenge_method, &form.state, &csrf_token,
+            Some("Adresse email invalide"),
+        );
+        return Html(html).into_response();
+    }
+
     // Test IMAP credentials — use configured defaults (env/config) when not provided
     let email = form.email.clone();
     let password = form.password.clone();
@@ -282,6 +377,28 @@ pub async fn authorize_post(
         form.imap_host.clone()
     };
     let imap_port = if form.imap_port == 0 { state.default_imap_port } else { form.imap_port };
+
+    // Validate IMAP host (SSRF protection) — only for user-supplied hosts
+    if !form.imap_host.is_empty() && !is_safe_imap_host(&imap_host) {
+        let csrf_token = generate_csrf_token(&state.store);
+        let html = authorize_html(
+            &form.client_id, &form.redirect_uri, &form.code_challenge,
+            &form.code_challenge_method, &form.state, &csrf_token,
+            Some("Serveur IMAP non autorise"),
+        );
+        return Html(html).into_response();
+    }
+
+    // Validate IMAP port
+    if form.imap_port != 0 && !is_valid_imap_port(imap_port) {
+        let csrf_token = generate_csrf_token(&state.store);
+        let html = authorize_html(
+            &form.client_id, &form.redirect_uri, &form.code_challenge,
+            &form.code_challenge_method, &form.state, &csrf_token,
+            Some("Port IMAP non autorise"),
+        );
+        return Html(html).into_response();
+    }
 
     let host = imap_host.clone();
     let port = imap_port;
@@ -305,7 +422,7 @@ pub async fn authorize_post(
                 password.clone(),
             ));
             let imap_client = Arc::new(ImapClient::new(auth, imap_host.clone(), imap_port));
-            let session_token = uuid::Uuid::new_v4().to_string();
+            let session_token = random_token(32);
 
             state
                 .sessions
@@ -316,6 +433,7 @@ pub async fn authorize_post(
                         imap: imap_client,
                         imap_host: imap_host.clone(),
                         imap_port,
+                        last_activity: chrono::Utc::now().timestamp(),
                     },
                 );
 
@@ -362,15 +480,17 @@ pub async fn authorize_post(
             Redirect::to(&redirect_url).into_response()
         }
         Ok(Err(e)) => {
+            // Log detailed error server-side only — do not leak to user
             tracing::warn!("OAuth authorize IMAP login failed for {}: {e}", form.email);
-            // Re-show form with error
+            let csrf_token = generate_csrf_token(&state.store);
             let html = authorize_html(
                 &form.client_id,
                 &form.redirect_uri,
                 &form.code_challenge,
                 &form.code_challenge_method,
                 &form.state,
-                Some(&format!("Echec de connexion IMAP : {e}")),
+                &csrf_token,
+                Some("Echec de connexion : identifiants incorrects ou serveur injoignable"),
             );
             Html(html).into_response()
         }
@@ -396,6 +516,9 @@ pub struct AuthorizeFormData {
     pub code_challenge_method: String,
     #[serde(default)]
     pub state: String,
+    /// CSRF token for form submission protection
+    #[serde(default)]
+    pub csrf_token: String,
 }
 
 // -- Token endpoint --
@@ -531,11 +654,11 @@ async fn handle_code_exchange(
             .into_response();
     }
 
-    // Verify client secret if applicable
+    // Verify client secret if applicable — constant-time comparison
     if let Some(secret) = &req.client_secret {
         if let Ok(Some(client)) = state.store.get_client(client_id) {
             if let Some(expected) = &client.client_secret {
-                if secret != expected {
+                if secret.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(serde_json::json!({"error": "invalid_client"})),
@@ -669,7 +792,8 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
             hasher.update(code_verifier.as_bytes());
             let digest = hasher.finalize();
             let computed = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-            computed == code_challenge
+            // Constant-time comparison to prevent timing attacks
+            computed.as_bytes().ct_eq(code_challenge.as_bytes()).unwrap_u8() == 1
         }
         _ => false,
     }
@@ -708,6 +832,7 @@ fn authorize_html(
     code_challenge: &str,
     code_challenge_method: &str,
     state: &str,
+    csrf_token: &str,
     error: Option<&str>,
 ) -> String {
     let error_html = match error {
@@ -809,6 +934,7 @@ fn authorize_html(
                 <input type="hidden" name="code_challenge" value="{code_challenge}">
                 <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
                 <input type="hidden" name="state" value="{state}">
+                <input type="hidden" name="csrf_token" value="{csrf_token}">
                 <div class="form-group">
                     <label for="email">Adresse email</label>
                     <input type="email" id="email" name="email" placeholder="prenom.nom@entreprise.com" required autocomplete="email">
@@ -846,5 +972,56 @@ fn authorize_html(
         code_challenge = code_challenge.replace('"', "&quot;"),
         code_challenge_method = code_challenge_method.replace('"', "&quot;"),
         state = state.replace('"', "&quot;"),
+        csrf_token = csrf_token.replace('"', "&quot;"),
     )
+}
+
+// -- Token Revocation (RFC 7009) --
+
+#[derive(Deserialize)]
+pub struct RevokeRequest {
+    pub token: String,
+    #[serde(default)]
+    pub token_type_hint: Option<String>,
+}
+
+/// POST /oauth/revoke — Revoke an access or refresh token
+pub async fn revoke_token(
+    State(state): State<Arc<OAuth2State>>,
+    axum::extract::Form(req): axum::extract::Form<RevokeRequest>,
+) -> impl IntoResponse {
+    // Try as access token first
+    let deleted = match req.token_type_hint.as_deref() {
+        Some("refresh_token") => {
+            // Try refresh token first
+            if let Ok(Some(stored)) = state.store.get_by_refresh_token(&req.token) {
+                let _ = state.store.delete_token(&stored.access_token);
+                true
+            } else if let Ok(Some(_)) = state.store.get_token(&req.token) {
+                let _ = state.store.delete_token(&req.token);
+                true
+            } else {
+                false
+            }
+        }
+        _ => {
+            // Try access token first
+            if let Ok(Some(_)) = state.store.get_token(&req.token) {
+                let _ = state.store.delete_token(&req.token);
+                true
+            } else if let Ok(Some(stored)) = state.store.get_by_refresh_token(&req.token) {
+                let _ = state.store.delete_token(&stored.access_token);
+                true
+            } else {
+                false
+            }
+        }
+    };
+
+    if deleted {
+        tracing::info!("Token revoked successfully");
+    }
+
+    // RFC 7009: always return 200, even if token was not found
+    StatusCode::OK
 }

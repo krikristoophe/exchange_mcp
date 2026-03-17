@@ -9,7 +9,13 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 - Conversion HTML → texte, decodage MIME/RFC 2047 multi-charset, detection des pieces jointes
 - Lecture sans marquage (BODY.PEEK) — lire un email ne le marque pas comme lu
 - Cache en memoire avec TTL pour des reponses rapides
-- Chiffrement AES-256-GCM des credentials IMAP en base de donnees
+- Chiffrement AES-256-GCM des credentials IMAP en base de donnees (zeroize en memoire)
+- Protection CSRF sur le formulaire d'autorisation
+- Headers de securite HTTP (CSP, HSTS, X-Frame-Options, etc.)
+- Validation SSRF des serveurs IMAP (blocage des IPs internes)
+- Comparaisons constant-time pour les secrets OAuth
+- Timeout de session avec nettoyage automatique
+- Revocation de token (RFC 7009)
 - Suppression automatique des reponses citees pour economiser des tokens
 - Lecture batch (plusieurs emails en un seul appel)
 - Snippets/previews dans les listes sans lire le contenu complet
@@ -138,6 +144,7 @@ Le serveur expose :
 | `POST /oauth/register` | Enregistrement dynamique de client (RFC 7591) |
 | `GET\|POST /oauth/authorize` | Endpoint d'autorisation (formulaire de login IMAP) |
 | `POST /oauth/token` | Endpoint de token (echange de code + refresh) |
+| `POST /oauth/revoke` | Revocation de token (RFC 7009) |
 | `/mcp` | Endpoint MCP (`Authorization: Bearer <token>` requis) |
 
 ## Flow OAuth 2.1

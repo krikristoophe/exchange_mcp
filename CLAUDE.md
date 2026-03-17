@@ -28,7 +28,7 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
-├── server.rs           # ExchangeMcpServer + 19 outils MCP
+├── server.rs           # ExchangeMcpServer + 19 outils MCP + resources UI (MCP Apps)
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -38,6 +38,9 @@ src/
 │   ├── mod.rs          # OAuth2State + re-exports
 │   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token, revoke)
 │   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions, CSRF tokens)
+├── ui_resources/       # Fichiers HTML pour MCP Apps (embarques via include_str!)
+│   ├── email_preview.html  # Preview d'un email avant/apres envoi
+│   └── inbox_list.html     # Liste des emails interactive avec statut lu/non-lu
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
     ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts
@@ -84,6 +87,14 @@ Client MCP
   - Transaction SQLite `IMMEDIATE` pour l'echange d'auth code (anti-replay)
   - Validation email et port IMAP cote serveur
   - Revocation de token via `POST /oauth/revoke` (RFC 7009)
+
+- **MCP Apps** (SEP-1865) :
+  - Les fichiers HTML sont dans `src/ui_resources/` et embarques au compile-time via `include_str!()`
+  - Les UI resources utilisent le scheme `ui://` et le mime type `text/html;profile=mcp-app`
+  - Les tools avec UI declarent `_meta.ui.resourceUri` via le helper `ui_meta()`
+  - Les tool results incluent `structuredContent` (donnees pour l'UI, pas envoyees au LLM) + `content` texte (pour le LLM)
+  - Le SDK JS `@modelcontextprotocol/ext-apps` est charge via CDN (esm.sh) dans les HTML
+  - L'extension `io.modelcontextprotocol/ui` est declaree dans les capabilities du serveur
 
 ## Points d'attention
 

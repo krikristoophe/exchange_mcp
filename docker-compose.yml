@@ -1,0 +1,16 @@
+services:
+  exchange-mcp:
+    build: .
+    ports:
+      - "${EXCHANGE_MCP_SSE_PORT:-3000}:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      - EXCHANGE_IMAP_HOST=${EXCHANGE_IMAP_HOST:-outlook.office365.com}
+      - EXCHANGE_IMAP_PORT=${EXCHANGE_IMAP_PORT:-993}
+      - EXCHANGE_MCP_SSE_HOST=0.0.0.0
+      - EXCHANGE_MCP_SSE_PORT=3000
+      - EXCHANGE_MCP_ISSUER=${EXCHANGE_MCP_ISSUER:-}
+      - EXCHANGE_MCP_OAUTH_DB=/data/oauth2.db
+      - RUST_LOG=${RUST_LOG:-info}
+    restart: unless-stopped

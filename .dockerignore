@@ -1,0 +1,8 @@
+target/
+.git/
+.gitignore
+*.env
+config.json
+token_cache.json
+README.md
+CLAUDE.md

@@ -17,6 +17,9 @@ OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 ## Architecture des fichiers
 
 ```
+Dockerfile              # Multi-stage build (builder + runtime debian-slim)
+docker-compose.yml      # Stack complete avec volume persistant ./data
+.env.example            # Variables d'environnement (a copier en .env)
 src/
 ├── main.rs             # Point d'entree + AuthMcpService (middleware Tower)
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
@@ -74,17 +77,38 @@ Voir la section complete dans le README.md. Les plus importantes :
 - `EXCHANGE_MCP_OAUTH_DB` — chemin de la base SQLite OAuth2
 - `RUST_LOG` — niveau de log
 
+## Docker
+
+Le projet inclut un `Dockerfile` (multi-stage build) et un `docker-compose.yml`.
+
+- **`.env`** : variables d'environnement (copier `.env.example`). Contient les variables configurables (IMAP host/port, issuer, log level).
+- **`./data/`** : volume monte pour la persistance SQLite (`oauth2.db`). Ce dossier est cree automatiquement a cote du `docker-compose.yml`.
+- Les variables statiques non sensibles (`SSE_HOST=0.0.0.0`, `SSE_PORT=3000`, `OAUTH_DB=/data/oauth2.db`) sont fixees dans le Dockerfile et le compose, pas dans le `.env`.
+
 ## Commandes utiles
 
 ```bash
-# Build
+# Build natif
 cargo build --release
 
-# Lancer
+# Lancer natif
 EXCHANGE_MCP_SSE_HOST=0.0.0.0 cargo run
 
 # Logs debug
 RUST_LOG=debug cargo run
+
+# Docker — lancer la stack
+cp .env.example .env   # puis editer .env
+docker compose up -d
+
+# Docker — rebuild + relancer
+docker compose up -d --build
+
+# Docker — logs
+docker compose logs -f
+
+# Docker — arreter
+docker compose down
 ```
 
 ## Regles importantes

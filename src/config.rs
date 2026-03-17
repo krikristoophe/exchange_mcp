@@ -49,12 +49,15 @@ pub struct Config {
     pub sse_port: u16,
 }
 
+pub const DEFAULT_IMAP_HOST: &str = "outlook.office365.com";
+pub const DEFAULT_IMAP_PORT: u16 = 993;
+
 fn default_imap_host() -> String {
-    "outlook.office365.com".to_string()
+    DEFAULT_IMAP_HOST.to_string()
 }
 
 fn default_imap_port() -> u16 {
-    993
+    DEFAULT_IMAP_PORT
 }
 
 fn default_smtp_host() -> String {

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{AuthProvider, BasicAuthProvider};
+use crate::config::{DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT};
 use crate::imap_client::ImapClient;
 use crate::oauth2_store::{AuthCode, OAuth2Store, RegisteredClient, StoredToken};
 use crate::session::{SessionStore, UserSession};
@@ -117,10 +118,6 @@ pub struct RegisterRequest {
     #[serde(default)]
     pub client_name: Option<String>,
     #[serde(default)]
-    pub grant_types: Option<Vec<String>>,
-    #[serde(default)]
-    pub response_types: Option<Vec<String>>,
-    #[serde(default)]
     pub token_endpoint_auth_method: Option<String>,
 }
 
@@ -213,8 +210,6 @@ pub struct AuthorizeParams {
     pub code_challenge: String,
     #[serde(default = "default_s256")]
     pub code_challenge_method: String,
-    #[serde(default)]
-    pub scope: Option<String>,
 }
 
 fn default_s256() -> String {
@@ -299,11 +294,11 @@ pub async fn authorize_post(
     let email = form.email.clone();
     let password = form.password.clone();
     let imap_host = if form.imap_host.is_empty() {
-        "outlook.office365.com".to_string()
+        DEFAULT_IMAP_HOST.to_string()
     } else {
         form.imap_host.clone()
     };
-    let imap_port = if form.imap_port == 0 { 993 } else { form.imap_port };
+    let imap_port = if form.imap_port == 0 { DEFAULT_IMAP_PORT } else { form.imap_port };
 
     let host = imap_host.clone();
     let port = imap_port;

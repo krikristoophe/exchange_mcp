@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use crate::imap_client::ImapClient;
 
 /// Represents an authenticated user session.
+#[allow(dead_code)]
 pub struct UserSession {
     pub email: String,
     pub imap: Arc<ImapClient>,
@@ -13,7 +14,7 @@ pub struct UserSession {
     pub imap_port: u16,
 }
 
-/// Thread-safe store for multi-user sessions, keyed by token.
+/// Thread-safe store for multi-user sessions, keyed by session token.
 pub struct SessionStore {
     sessions: RwLock<HashMap<String, UserSession>>,
 }
@@ -29,18 +30,6 @@ impl SessionStore {
         self.sessions.write().await.insert(token, session);
     }
 
-    pub async fn get_imap(&self, token: &str) -> Option<Arc<ImapClient>> {
-        self.sessions.read().await.get(token).map(|s| s.imap.clone())
-    }
-
-    pub async fn get_email(&self, token: &str) -> Option<String> {
-        self.sessions.read().await.get(token).map(|s| s.email.clone())
-    }
-
-    pub async fn remove(&self, token: &str) -> Option<UserSession> {
-        self.sessions.write().await.remove(token)
-    }
-
     pub async fn contains(&self, token: &str) -> bool {
         self.sessions.read().await.contains_key(token)
     }
@@ -50,15 +39,5 @@ impl SessionStore {
         &self,
     ) -> tokio::sync::RwLockReadGuard<'_, HashMap<String, UserSession>> {
         self.sessions.blocking_read()
-    }
-
-    /// List all active sessions (token, email).
-    pub async fn list(&self) -> Vec<(String, String)> {
-        self.sessions
-            .read()
-            .await
-            .iter()
-            .map(|(token, s)| (token.clone(), s.email.clone()))
-            .collect()
     }
 }

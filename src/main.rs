@@ -12,13 +12,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rmcp::ServiceExt;
-use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::config::Config;
 use crate::imap_client::ImapClient;
-use crate::login::AppState;
 use crate::oauth::OAuthManager;
 use crate::oauth2_server::OAuth2State;
 use crate::oauth2_store::OAuth2Store;
@@ -109,25 +107,17 @@ async fn start_http_server(config: Config) -> Result<()> {
 
     let session_store = Arc::new(SessionStore::new());
 
-    // Compute issuer URL from config
     let issuer = config.issuer_url();
 
-    // Open OAuth2 SQLite store
     let oauth2_store = Arc::new(OAuth2Store::open(Some(OAuth2Store::db_path()))?);
     tracing::info!("OAuth2 store: {:?}", OAuth2Store::db_path());
 
-    // Cleanup expired entries on startup
     let _ = oauth2_store.cleanup_expired();
 
     let oauth2_state = Arc::new(OAuth2State {
         store: oauth2_store.clone(),
         sessions: session_store.clone(),
         issuer: issuer.clone(),
-    });
-
-    let app_state = Arc::new(AppState {
-        sessions: session_store.clone(),
-        config: RwLock::new(config),
     });
 
     // MCP service — the factory reads CURRENT_USER_TOKEN task-local
@@ -146,7 +136,6 @@ async fn start_http_server(config: Config) -> Result<()> {
             })?;
 
             let sessions = sessions_for_mcp.clone();
-            // Use blocking_read since we're in a sync context inside the factory
             let guard = sessions.sessions_blocking_read();
             match guard.get(&token) {
                 Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
@@ -161,26 +150,17 @@ async fn start_http_server(config: Config) -> Result<()> {
     );
 
     // Wrap MCP service with auth middleware that:
-    // 1. Extracts Bearer token from the request
-    // 2. Resolves OAuth2 access tokens → session tokens
-    // 3. Falls back to raw session tokens (legacy mode)
-    // 4. Returns 401 with RFC 9728 metadata hint when no valid token
+    // 1. Extracts Bearer token from the Authorization header
+    // 2. Resolves OAuth2 access tokens to session tokens
+    // 3. Returns 401 with RFC 9728 metadata hint when no valid token
     let auth_mcp = AuthMcpService {
         inner: mcp_service,
-        sessions: session_store.clone(),
-        oauth2_store: oauth2_store.clone(),
+        oauth2_store,
         issuer: issuer.clone(),
     };
 
     let router = axum::Router::new()
-        // Existing login UI & API
-        .route("/", axum::routing::get(login::login_page))
-        .route("/api/login", axum::routing::post(login::api_login))
-        .route("/api/logout", axum::routing::post(login::api_logout))
-        .route("/api/status", axum::routing::get(login::api_status))
-        .route("/api/sessions", axum::routing::get(login::api_sessions))
         .route("/favicon.ico", axum::routing::get(login::favicon))
-        .with_state(app_state)
         // OAuth 2.1 well-known endpoints
         .route(
             "/.well-known/oauth-protected-resource",
@@ -209,8 +189,7 @@ async fn start_http_server(config: Config) -> Result<()> {
         .nest_service("/mcp", auth_mcp);
 
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("Login page:   http://{addr}/");
-    tracing::info!("MCP endpoint: http://{addr}/mcp (OAuth 2.1 or ?token=)");
+    tracing::info!("MCP endpoint: http://{addr}/mcp (OAuth 2.1)");
     tracing::info!("OAuth metadata: http://{addr}/.well-known/oauth-authorization-server");
 
     axum::serve(tcp_listener, router).await?;
@@ -218,16 +197,14 @@ async fn start_http_server(config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Tower Service wrapper that extracts the auth token from the request,
+/// Tower Service wrapper that extracts the Bearer token from the request,
 /// resolves OAuth2 access tokens to session tokens, and sets the
 /// CURRENT_USER_TOKEN task-local before delegating to the inner MCP service.
 ///
-/// If no valid token is provided, returns HTTP 401 with a `WWW-Authenticate`
-/// header pointing to the protected resource metadata (RFC 9728).
+/// Returns HTTP 401 with `WWW-Authenticate` header (RFC 9728) when no valid token.
 #[derive(Clone)]
 struct AuthMcpService<S> {
     inner: S,
-    sessions: Arc<SessionStore>,
     oauth2_store: Arc<OAuth2Store>,
     issuer: String,
 }
@@ -250,7 +227,6 @@ where
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        // We always wrap errors ourselves, so we're always ready
         match self.inner.poll_ready(cx) {
             std::task::Poll::Ready(_) => std::task::Poll::Ready(Ok(())),
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -258,37 +234,21 @@ where
     }
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
-        let bearer_token = login::extract_token(&req);
+        let bearer_token = login::extract_bearer_token(&req);
         let oauth2_store = self.oauth2_store.clone();
-        let sessions = self.sessions.clone();
         let issuer = self.issuer.clone();
         let mut inner = self.inner.clone();
         std::mem::swap(&mut self.inner, &mut inner);
 
         Box::pin(async move {
-            // Resolve the bearer token to a session token:
-            // 1. Try as OAuth2 access token → get session_token
-            // 2. Fall back to using it directly as a session token (legacy)
-            // 3. If neither works, return 401
-            let session_token = match bearer_token {
-                Some(token) => {
-                    // Try OAuth2 access token first
-                    if let Ok(Some(stored)) = oauth2_store.get_token(&token) {
-                        // Verify the underlying session still exists
-                        if sessions.contains(&stored.session_token).await {
-                            Some(stored.session_token)
-                        } else {
-                            None
-                        }
-                    } else if sessions.contains(&token).await {
-                        // Legacy: direct session token
-                        Some(token)
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            };
+            // Resolve Bearer token → OAuth2 access token → session token
+            let session_token = bearer_token.and_then(|token| {
+                oauth2_store
+                    .get_token(&token)
+                    .ok()
+                    .flatten()
+                    .map(|stored| stored.session_token)
+            });
 
             match session_token {
                 Some(st) => {
@@ -306,12 +266,10 @@ where
                     }
                 }
                 None => {
-                    // Return 401 with WWW-Authenticate header (RFC 9728)
-                    let resource_meta_url =
-                        format!("{}/.well-known/oauth-protected-resource", issuer);
+                    // 401 with WWW-Authenticate header (RFC 9728)
                     let www_auth = format!(
-                        r#"Bearer resource_metadata="{}""#,
-                        resource_meta_url
+                        r#"Bearer resource_metadata="{}/.well-known/oauth-protected-resource""#,
+                        issuer
                     );
                     Ok(http::Response::builder()
                         .status(http::StatusCode::UNAUTHORIZED)
@@ -327,7 +285,7 @@ where
     }
 }
 
-/// Marker trait — we need S::Response to be convertible to http::Response<Body>.
+/// Converts inner service response to http::Response<axum::body::Body>.
 trait IntoMcpResponse {
     fn into_mcp_response(self) -> http::Response<axum::body::Body>;
 }

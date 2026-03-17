@@ -9,6 +9,8 @@ pub struct ImapClient {
     auth: Arc<dyn AuthProvider>,
     host: String,
     port: u16,
+    smtp_host: String,
+    smtp_port: u16,
     cache: Arc<EmailCache>,
 }
 
@@ -62,11 +64,19 @@ pub struct FolderStatus {
 }
 
 impl ImapClient {
-    pub fn new(auth: Arc<dyn AuthProvider>, host: String, port: u16) -> Self {
+    pub fn new(
+        auth: Arc<dyn AuthProvider>,
+        host: String,
+        port: u16,
+        smtp_host: String,
+        smtp_port: u16,
+    ) -> Self {
         Self {
             auth,
             host,
             port,
+            smtp_host,
+            smtp_port,
             cache: Arc::new(EmailCache::new()),
         }
     }
@@ -476,4 +486,384 @@ impl ImapClient {
         })
         .await?
     }
+
+    /// Build an RFC 822 message from components.
+    fn build_message(
+        from: &str,
+        to: &[String],
+        cc: &[String],
+        subject: &str,
+        body: &str,
+        in_reply_to: Option<&str>,
+        references: Option<&str>,
+    ) -> Result<String> {
+        use lettre::message::{header, Mailbox, MessageBuilder};
+
+        let from_mailbox: Mailbox = from.parse().context("Invalid From address")?;
+        let mut builder = MessageBuilder::new()
+            .from(from_mailbox)
+            .subject(subject);
+
+        for addr in to {
+            let mb: Mailbox = addr.trim().parse().context(format!("Invalid To address: {addr}"))?;
+            builder = builder.to(mb);
+        }
+        for addr in cc {
+            let mb: Mailbox = addr.trim().parse().context(format!("Invalid Cc address: {addr}"))?;
+            builder = builder.cc(mb);
+        }
+
+        if let Some(msg_id) = in_reply_to {
+            builder = builder.header(header::InReplyTo::from(msg_id.to_string()));
+            if let Some(refs) = references {
+                builder = builder.header(header::References::from(refs.to_string()));
+            } else {
+                builder = builder.header(header::References::from(msg_id.to_string()));
+            }
+        }
+
+        let message = builder
+            .header(header::ContentType::TEXT_PLAIN)
+            .body(body.to_string())
+            .context("Failed to build email message")?;
+
+        Ok(String::from_utf8(message.formatted())
+            .context("Message contains invalid UTF-8")?)
+    }
+
+    /// Send an email via SMTP and save a copy to "Sent Items" via IMAP APPEND.
+    fn send_smtp_and_save(
+        smtp_host: &str,
+        smtp_port: u16,
+        imap_host: &str,
+        imap_port: u16,
+        credentials: &ImapCredentials,
+        rfc822: &[u8],
+    ) -> Result<()> {
+        use lettre::{SmtpTransport, Transport};
+        use lettre::transport::smtp::authentication::Credentials as SmtpCreds;
+
+        let creds = SmtpCreds::new(
+            credentials.username.clone(),
+            credentials.password.clone(),
+        );
+
+        let mailer = SmtpTransport::starttls_relay(smtp_host)
+            .context("Failed to create SMTP transport")?
+            .port(smtp_port)
+            .credentials(creds)
+            .build();
+
+        let envelope = lettre::address::Envelope::new(
+            {
+                let addr: lettre::Address = credentials.username.parse()
+                    .context("Invalid sender address for SMTP envelope")?;
+                Some(addr)
+            },
+            {
+                // Parse recipients from the RFC 822 message To and Cc headers
+                let parsed = mailparse::parse_mail(rfc822).context("Failed to parse composed message")?;
+                let mut recipients = Vec::new();
+                for hdr in &parsed.headers {
+                    let key = hdr.get_key().to_lowercase();
+                    if key == "to" || key == "cc" || key == "bcc" {
+                        let value = hdr.get_value();
+                        for addr_str in value.split(',') {
+                            let addr_str = addr_str.trim();
+                            // Extract email from "Name <email>" or plain "email"
+                            let email = if let Some(start) = addr_str.rfind('<') {
+                                addr_str[start + 1..].trim_end_matches('>').trim()
+                            } else {
+                                addr_str
+                            };
+                            if let Ok(addr) = email.parse::<lettre::Address>() {
+                                recipients.push(addr);
+                            }
+                        }
+                    }
+                }
+                if recipients.is_empty() {
+                    anyhow::bail!("No valid recipients found");
+                }
+                recipients
+            },
+        ).context("Failed to build SMTP envelope")?;
+
+        mailer.send_raw(&envelope, rfc822).context("SMTP send failed")?;
+
+        // Save to Sent Items via IMAP APPEND
+        let mut session = Self::connect_sync(imap_host, imap_port, ImapCredentials {
+            username: credentials.username.clone(),
+            password: credentials.password.clone(),
+        })?;
+        let _ = session.append("Sent Items", rfc822);
+        session.logout()?;
+
+        Ok(())
+    }
+
+    /// Create a draft email (saved to Drafts folder via IMAP APPEND).
+    pub async fn create_draft(
+        &self,
+        to: &[String],
+        cc: &[String],
+        subject: &str,
+        body: &str,
+    ) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+        let from = credentials.username.clone();
+        let rfc822 = Self::build_message(&from, to, cc, subject, body, None, None)?;
+
+        let host = self.host.clone();
+        let port = self.port;
+        let cache = self.cache.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, ImapCredentials {
+                username: credentials.username,
+                password: credentials.password,
+            })?;
+            session
+                .append_with_flags("Drafts", rfc822.as_bytes(), &[imap::types::Flag::Draft])
+                .context("Failed to save draft")?;
+            session.logout()?;
+            cache.invalidate_folder("Drafts");
+            Ok("Draft saved to Drafts folder".to_string())
+        })
+        .await?
+    }
+
+    /// Send an email via SMTP and save to Sent Items.
+    pub async fn send_email(
+        &self,
+        to: &[String],
+        cc: &[String],
+        subject: &str,
+        body: &str,
+    ) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+        let from = credentials.username.clone();
+        let rfc822 = Self::build_message(&from, to, cc, subject, body, None, None)?;
+
+        let smtp_host = self.smtp_host.clone();
+        let smtp_port = self.smtp_port;
+        let imap_host = self.host.clone();
+        let imap_port = self.port;
+        let cache = self.cache.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::send_smtp_and_save(
+                &smtp_host, smtp_port,
+                &imap_host, imap_port,
+                &credentials,
+                rfc822.as_bytes(),
+            )?;
+            cache.invalidate_folder("Sent Items");
+            Ok("Email sent successfully".to_string())
+        })
+        .await?
+    }
+
+    /// Reply to an email. Reads the original, composes a reply, sends via SMTP.
+    pub async fn reply_email(
+        &self,
+        folder: &str,
+        uid: u32,
+        body: &str,
+        reply_all: bool,
+    ) -> Result<String> {
+        // Read original email for subject, from, message-id, etc.
+        let original = self.read_email(folder, uid).await?;
+
+        let credentials = self.auth.get_credentials().await?;
+        let from = credentials.username.clone();
+
+        // Build reply subject
+        let subject = if original.subject.starts_with("Re:") || original.subject.starts_with("RE:") {
+            original.subject.clone()
+        } else {
+            format!("Re: {}", original.subject)
+        };
+
+        // Determine recipients
+        let to_addrs = vec![extract_email_address(&original.from)];
+        let mut cc_addrs = Vec::new();
+        if reply_all {
+            // Add original To (minus ourselves) to CC
+            for addr in parse_address_list(&original.to) {
+                if addr.to_lowercase() != from.to_lowercase() {
+                    cc_addrs.push(addr);
+                }
+            }
+            // Add original CC (minus ourselves)
+            for addr in parse_address_list(&original.cc) {
+                if addr.to_lowercase() != from.to_lowercase() {
+                    cc_addrs.push(addr);
+                }
+            }
+        }
+
+        // Get Message-ID from original for In-Reply-To
+        let message_id = self.get_message_id(folder, uid).await.ok();
+
+        // Build quoted body
+        let quoted_original = original.body_text.lines()
+            .map(|l| format!("> {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let full_body = format!(
+            "{body}\n\nOn {date}, {from_addr} wrote:\n{quoted}",
+            date = original.date,
+            from_addr = original.from,
+            quoted = quoted_original,
+        );
+
+        let rfc822 = Self::build_message(
+            &from,
+            &to_addrs,
+            &cc_addrs,
+            &subject,
+            &full_body,
+            message_id.as_deref(),
+            None,
+        )?;
+
+        let smtp_host = self.smtp_host.clone();
+        let smtp_port = self.smtp_port;
+        let imap_host = self.host.clone();
+        let imap_port = self.port;
+        let cache = self.cache.clone();
+
+        tokio::task::spawn_blocking(move || {
+            Self::send_smtp_and_save(
+                &smtp_host, smtp_port,
+                &imap_host, imap_port,
+                &credentials,
+                rfc822.as_bytes(),
+            )?;
+            cache.invalidate_folder("Sent Items");
+            Ok(format!(
+                "Reply sent to {}",
+                to_addrs.join(", ")
+            ))
+        })
+        .await?
+    }
+
+    /// Forward an email. Reads the original, composes a forward, sends via SMTP.
+    pub async fn forward_email(
+        &self,
+        folder: &str,
+        uid: u32,
+        to: &[String],
+        cc: &[String],
+        body: &str,
+    ) -> Result<String> {
+        let original = self.read_email(folder, uid).await?;
+
+        let credentials = self.auth.get_credentials().await?;
+        let from = credentials.username.clone();
+
+        let subject = if original.subject.starts_with("Fwd:") || original.subject.starts_with("FW:") {
+            original.subject.clone()
+        } else {
+            format!("Fwd: {}", original.subject)
+        };
+
+        let forwarded_body = format!(
+            "{body}\n\n---------- Forwarded message ----------\n\
+             From: {from_addr}\n\
+             Date: {date}\n\
+             Subject: {subj}\n\
+             To: {to_addr}\n\n\
+             {orig_body}",
+            from_addr = original.from,
+            date = original.date,
+            subj = original.subject,
+            to_addr = original.to,
+            orig_body = original.body_text,
+        );
+
+        let rfc822 = Self::build_message(
+            &from,
+            to,
+            cc,
+            &subject,
+            &forwarded_body,
+            None,
+            None,
+        )?;
+
+        let smtp_host = self.smtp_host.clone();
+        let smtp_port = self.smtp_port;
+        let imap_host = self.host.clone();
+        let imap_port = self.port;
+        let cache = self.cache.clone();
+        let to_display: Vec<String> = to.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            Self::send_smtp_and_save(
+                &smtp_host, smtp_port,
+                &imap_host, imap_port,
+                &credentials,
+                rfc822.as_bytes(),
+            )?;
+            cache.invalidate_folder("Sent Items");
+            Ok(format!(
+                "Email forwarded to {}",
+                to_display.join(", ")
+            ))
+        })
+        .await?
+    }
+
+    /// Get the Message-ID header of an email by UID.
+    async fn get_message_id(&self, folder: &str, uid: u32) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder)?;
+            let messages = session.uid_fetch(uid.to_string(), "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]")?;
+            let msg = messages.iter().next().context("Email not found")?;
+            let header_bytes = msg.body().context("No header data")?;
+            let header_str = String::from_utf8_lossy(header_bytes);
+            session.logout()?;
+
+            // Parse "Message-ID: <xxx>\r\n"
+            for line in header_str.lines() {
+                let line = line.trim();
+                if let Some(value) = line.strip_prefix("Message-ID:").or_else(|| line.strip_prefix("Message-Id:")).or_else(|| line.strip_prefix("message-id:")) {
+                    return Ok(value.trim().to_string());
+                }
+            }
+            anyhow::bail!("No Message-ID header found")
+        })
+        .await?
+    }
+}
+
+/// Extract a bare email address from "Name <email@example.com>" or "email@example.com".
+fn extract_email_address(addr: &str) -> String {
+    if let Some(start) = addr.rfind('<') {
+        addr[start + 1..].trim_end_matches('>').trim().to_string()
+    } else {
+        addr.trim().to_string()
+    }
+}
+
+/// Parse a comma-separated address list into individual email addresses.
+fn parse_address_list(addrs: &str) -> Vec<String> {
+    if addrs.is_empty() {
+        return Vec::new();
+    }
+    addrs
+        .split(',')
+        .map(|a| extract_email_address(a.trim()))
+        .filter(|a| !a.is_empty())
+        .collect()
 }

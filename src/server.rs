@@ -134,6 +134,61 @@ pub struct FolderStatusParams {
     pub folder: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateDraftParams {
+    /// Recipient email addresses
+    pub to: Vec<String>,
+    /// CC recipients (optional)
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Email subject
+    pub subject: String,
+    /// Email body (plain text)
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendEmailParams {
+    /// Recipient email addresses
+    pub to: Vec<String>,
+    /// CC recipients (optional)
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Email subject
+    pub subject: String,
+    /// Email body (plain text)
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReplyParams {
+    /// Folder containing the original email
+    pub folder: String,
+    /// UID of the email to reply to
+    pub uid: u32,
+    /// Reply body (plain text)
+    pub body: String,
+    /// Reply to all recipients (default: false)
+    #[serde(default)]
+    pub reply_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ForwardParams {
+    /// Folder containing the email to forward
+    pub folder: String,
+    /// UID of the email to forward
+    pub uid: u32,
+    /// Recipient email addresses
+    pub to: Vec<String>,
+    /// CC recipients (optional)
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Additional message to include before the forwarded content (optional)
+    #[serde(default)]
+    pub body: String,
+}
+
 /// Post-process an email detail according to format and strip_quotes options.
 fn process_email_detail(
     mut email: crate::imap::client::EmailDetail,
@@ -286,18 +341,53 @@ impl ExchangeMcpServer {
             Err(e) => format!("Error: {e}"),
         }
     }
+
+    #[tool(description = "Create a draft email and save it to the Drafts folder. The email is NOT sent.")]
+    async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> String {
+        match self.imap.create_draft(&params.to, &params.cc, &params.subject, &params.body).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error creating draft: {e}"),
+        }
+    }
+
+    #[tool(description = "Send an email via SMTP. The sent message is saved to the Sent Items folder.")]
+    async fn send_email(&self, Parameters(params): Parameters<SendEmailParams>) -> String {
+        match self.imap.send_email(&params.to, &params.cc, &params.subject, &params.body).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error sending email: {e}"),
+        }
+    }
+
+    #[tool(description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients.")]
+    async fn reply(&self, Parameters(params): Parameters<ReplyParams>) -> String {
+        let reply_all = params.reply_all.unwrap_or(false);
+        match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error sending reply: {e}"),
+        }
+    }
+
+    #[tool(description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.")]
+    async fn forward(&self, Parameters(params): Parameters<ForwardParams>) -> String {
+        match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error forwarding email: {e}"),
+        }
+    }
 }
 
 impl ServerHandler for ExchangeMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Exchange MCP Server - Access Microsoft Exchange emails via IMAP. \
+                "Exchange MCP Server - Access Microsoft Exchange emails via IMAP/SMTP. \
                  Use list_folders to discover available folders, list_emails to browse, \
                  read_email to read full content, read_emails to read multiple at once, \
                  and search_emails to find specific messages. \
                  Reading emails does NOT mark them as read. \
-                 Use include_preview=true on list/search to get text snippets without reading full emails.",
+                 Use include_preview=true on list/search to get text snippets without reading full emails. \
+                 Use create_draft to save a draft, send_email to send a new email, \
+                 reply to respond to an email, and forward to forward an email.",
             )
     }
 

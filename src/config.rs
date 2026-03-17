@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 pub const DEFAULT_IMAP_HOST: &str = "outlook.office365.com";
 pub const DEFAULT_IMAP_PORT: u16 = 993;
+pub const DEFAULT_SMTP_HOST: &str = "smtp.office365.com";
+pub const DEFAULT_SMTP_PORT: u16 = 587;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -12,6 +14,12 @@ pub struct Config {
     /// IMAP server port
     #[serde(default = "default_imap_port")]
     pub imap_port: u16,
+    /// SMTP server hostname
+    #[serde(default = "default_smtp_host")]
+    pub smtp_host: String,
+    /// SMTP server port
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
     /// HTTP server bind address
     #[serde(default = "default_sse_host")]
     pub sse_host: String,
@@ -26,6 +34,14 @@ fn default_imap_host() -> String {
 
 fn default_imap_port() -> u16 {
     DEFAULT_IMAP_PORT
+}
+
+fn default_smtp_host() -> String {
+    DEFAULT_SMTP_HOST.to_string()
+}
+
+fn default_smtp_port() -> u16 {
+    DEFAULT_SMTP_PORT
 }
 
 fn default_sse_host() -> String {
@@ -69,6 +85,12 @@ impl Config {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or_else(default_imap_port),
+            smtp_host: std::env::var("EXCHANGE_SMTP_HOST")
+                .unwrap_or_else(|_| default_smtp_host()),
+            smtp_port: std::env::var("EXCHANGE_SMTP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(default_smtp_port),
             sse_host: std::env::var("EXCHANGE_MCP_SSE_HOST")
                 .unwrap_or_else(|_| default_sse_host()),
             sse_port: std::env::var("EXCHANGE_MCP_SSE_PORT")
@@ -98,6 +120,14 @@ impl Config {
         if let Ok(v) = std::env::var("EXCHANGE_IMAP_PORT") {
             if let Ok(p) = v.parse() {
                 self.imap_port = p;
+            }
+        }
+        if let Ok(v) = std::env::var("EXCHANGE_SMTP_HOST") {
+            self.smtp_host = v;
+        }
+        if let Ok(v) = std::env::var("EXCHANGE_SMTP_PORT") {
+            if let Ok(p) = v.parse() {
+                self.smtp_port = p;
             }
         }
         if let Ok(v) = std::env::var("EXCHANGE_MCP_SSE_HOST") {

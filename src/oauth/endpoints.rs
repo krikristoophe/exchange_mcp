@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::{AuthProvider, BasicAuthProvider};
 use crate::imap::ImapClient;
 use crate::session::UserSession;
-use super::store::{AuthCode, RegisteredClient, StoredToken};
+use super::store::{AuthCode, PersistedSession, RegisteredClient, StoredToken};
 use super::OAuth2State;
 
 // -- Helper: generate a random URL-safe token --
@@ -302,7 +302,7 @@ pub async fn authorize_post(
             // IMAP OK — create session
             let auth: Arc<dyn AuthProvider> = Arc::new(BasicAuthProvider::new(
                 email.clone(),
-                password,
+                password.clone(),
             ));
             let imap_client = Arc::new(ImapClient::new(auth, imap_host.clone(), imap_port));
             let session_token = uuid::Uuid::new_v4().to_string();
@@ -314,10 +314,21 @@ pub async fn authorize_post(
                     UserSession {
                         email: email.clone(),
                         imap: imap_client,
-                        imap_host,
+                        imap_host: imap_host.clone(),
                         imap_port,
                     },
                 );
+
+            // Persist session to SQLite for restart survival
+            if let Err(e) = state.store.persist_session(&PersistedSession {
+                session_token: session_token.clone(),
+                email: email.clone(),
+                password: password.clone(),
+                imap_host,
+                imap_port,
+            }) {
+                tracing::warn!("Failed to persist session: {e}");
+            }
 
             // Generate auth code
             let code = random_token(32);

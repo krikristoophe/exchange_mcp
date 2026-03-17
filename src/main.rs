@@ -11,11 +11,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
+use crate::auth::{AuthProvider, BasicAuthProvider};
+use crate::imap::ImapClient;
 use crate::middleware::AuthMcpService;
 use crate::oauth::OAuth2State;
 use crate::oauth::store::OAuth2Store;
 use crate::server::ExchangeMcpServer;
-use crate::session::SessionStore;
+use crate::session::{SessionStore, UserSession};
 
 tokio::task_local! {
     /// The current user's session token, set by the MCP auth middleware.
@@ -54,7 +56,36 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     let oauth2_store = Arc::new(OAuth2Store::open(Some(OAuth2Store::db_path()))?);
     tracing::info!("OAuth2 store: {:?}", OAuth2Store::db_path());
 
-    let _ = oauth2_store.cleanup_expired();
+    // Restore persisted sessions from SQLite (survives server restarts)
+    let mut restored_tokens = Vec::new();
+    match oauth2_store.load_all_sessions() {
+        Ok(persisted) => {
+            for ps in persisted {
+                let auth: Arc<dyn AuthProvider> =
+                    Arc::new(BasicAuthProvider::new(ps.email.clone(), ps.password));
+                let imap_client = Arc::new(ImapClient::new(auth, ps.imap_host.clone(), ps.imap_port));
+                session_store.insert(
+                    ps.session_token.clone(),
+                    UserSession {
+                        email: ps.email.clone(),
+                        imap: imap_client,
+                        imap_host: ps.imap_host,
+                        imap_port: ps.imap_port,
+                    },
+                );
+                restored_tokens.push(ps.session_token);
+            }
+            if !restored_tokens.is_empty() {
+                tracing::info!("Restored {} session(s) from database", restored_tokens.len());
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load persisted sessions: {e}");
+        }
+    }
+
+    // Clean up OAuth tokens referencing sessions that no longer exist
+    let _ = oauth2_store.cleanup_orphaned_tokens(&restored_tokens);
 
     let oauth2_state = Arc::new(OAuth2State {
         store: oauth2_store.clone(),
@@ -97,6 +128,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     let auth_mcp = AuthMcpService {
         inner: mcp_service,
         oauth2_store,
+        sessions: session_store.clone(),
         issuer: issuer.clone(),
     };
 

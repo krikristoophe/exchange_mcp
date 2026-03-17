@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use rmcp::{
     ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResult, ListToolsResult,
+        ServerCapabilities, ServerInfo,
+    },
+    service::RequestContext, RoleServer,
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
@@ -215,5 +219,25 @@ impl ServerHandler for ExchangeMcpServer {
                  Use list_folders to discover available folders, list_emails to browse, \
                  read_email to read full content, and search_emails to find specific messages.",
             )
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::model::ErrorData>> + Send + '_ {
+        std::future::ready(Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            ..Default::default()
+        }))
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::model::ErrorData>> + Send + '_ {
+        let tool_context = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tool_context)
     }
 }

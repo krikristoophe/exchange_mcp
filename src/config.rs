@@ -154,6 +154,20 @@ impl Config {
         })
     }
 
+    /// The OAuth 2.1 issuer URL. Override with EXCHANGE_MCP_ISSUER env var.
+    /// Defaults to http://<sse_host>:<sse_port>.
+    pub fn issuer_url(&self) -> String {
+        if let Ok(url) = std::env::var("EXCHANGE_MCP_ISSUER") {
+            return url.trim_end_matches('/').to_string();
+        }
+        let host = if self.sse_host == "0.0.0.0" {
+            "localhost"
+        } else {
+            &self.sse_host
+        };
+        format!("http://{}:{}", host, self.sse_port)
+    }
+
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("EXCHANGE_AUTH_METHOD") {
             self.auth_method = v;

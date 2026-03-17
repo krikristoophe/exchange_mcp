@@ -43,3 +43,9 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 tower = "0.5"
 http = "1"
+http-body-util = "0.1"
+bytes = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.34", features = ["bundled"] }
+rand = "0.9"
+url = "2"

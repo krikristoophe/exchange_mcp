@@ -28,6 +28,7 @@ impl ExchangeMcpServer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn imap_ref(&self) -> &Arc<ImapClient> {
         &self.imap
     }

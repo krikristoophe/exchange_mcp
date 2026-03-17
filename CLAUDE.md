@@ -134,3 +134,4 @@ docker compose down
 - **Pas de mode stdio** — le serveur fonctionne uniquement en HTTP multi-utilisateur.
 - **Pas d'auth OAuth2 Microsoft cote IMAP** — l'auth IMAP est toujours login/password. L'OAuth 2.1 sert uniquement a authentifier les clients MCP.
 - **Tester la compilation** (`cargo build`) avant de commit.
+- **Zero warning** : `cargo check` ne doit produire aucun warning sur le code du projet (les warnings des dependances externes sont acceptables). Utiliser `#[allow(dead_code)]` sur les methodes publiques utilitaires non encore appelees plutot que de les supprimer.

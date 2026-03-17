@@ -264,6 +264,7 @@ impl OAuth2Store {
     }
 
     /// Cleanup expired codes and tokens.
+    #[allow(dead_code)]
     pub fn cleanup_expired(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -387,6 +388,7 @@ impl OAuth2Store {
         Ok(sessions)
     }
 
+    #[allow(dead_code)]
     pub fn delete_session(&self, session_token: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

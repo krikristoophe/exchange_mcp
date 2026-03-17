@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::imap::ImapClient;
 
@@ -26,18 +24,18 @@ impl SessionStore {
         }
     }
 
-    pub async fn insert(&self, token: String, session: UserSession) {
-        self.sessions.write().await.insert(token, session);
+    pub fn insert(&self, token: String, session: UserSession) {
+        self.sessions.write().unwrap().insert(token, session);
     }
 
-    pub async fn contains(&self, token: &str) -> bool {
-        self.sessions.read().await.contains_key(token)
+    pub fn contains(&self, token: &str) -> bool {
+        self.sessions.read().unwrap().contains_key(token)
     }
 
-    /// Blocking read access (for use in sync contexts like MCP factory).
-    pub fn sessions_blocking_read(
+    /// Read access for sync contexts (e.g. MCP factory).
+    pub fn sessions_read(
         &self,
-    ) -> tokio::sync::RwLockReadGuard<'_, HashMap<String, UserSession>> {
-        self.sessions.blocking_read()
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, UserSession>> {
+        self.sessions.read().unwrap()
     }
 }

@@ -338,13 +338,15 @@ impl OAuth2Store {
 
     pub fn persist_session(&self, session: &PersistedSession) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Encrypt the password before storing
+        let encrypted_password = crate::crypto::encrypt(&session.password)?;
         conn.execute(
             "INSERT OR REPLACE INTO sessions (session_token, email, password, imap_host, imap_port)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 session.session_token,
                 session.email,
-                session.password,
+                encrypted_password,
                 session.imap_host,
                 session.imap_port,
             ],
@@ -368,7 +370,19 @@ impl OAuth2Store {
         })?;
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row?);
+            let mut session = row?;
+            // Decrypt password (handles both encrypted and legacy plaintext)
+            match crate::crypto::decrypt_or_plaintext(&session.password) {
+                Ok(decrypted) => session.password = decrypted,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to decrypt password for session {}: {e}",
+                        session.session_token
+                    );
+                    continue; // Skip sessions with corrupt credentials
+                }
+            }
+            sessions.push(session);
         }
         Ok(sessions)
     }

@@ -6,7 +6,13 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 
 - OAuth 2.1 Authorization Server integre (PKCE, Dynamic Client Registration)
 - Multi-utilisateur avec sessions IMAP isolees
-- Conversion HTML → texte, decodage MIME/RFC 2047, detection des pieces jointes
+- Conversion HTML → texte, decodage MIME/RFC 2047 multi-charset, detection des pieces jointes
+- Lecture sans marquage (BODY.PEEK) — lire un email ne le marque pas comme lu
+- Cache en memoire avec TTL pour des reponses rapides
+- Chiffrement AES-256-GCM des credentials IMAP en base de donnees
+- Suppression automatique des reponses citees pour economiser des tokens
+- Lecture batch (plusieurs emails en un seul appel)
+- Snippets/previews dans les listes sans lire le contenu complet
 - Compatible avec tout serveur IMAP (Exchange, Gmail, Dovecot, etc.)
 
 ### Outils MCP
@@ -14,9 +20,10 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | Outil | Description |
 |-------|-------------|
 | `list_folders` | Lister tous les dossiers (INBOX, Sent Items, etc.) |
-| `list_emails` | Lister les emails recents d'un dossier |
-| `read_email` | Lire le contenu complet d'un email |
-| `search_emails` | Rechercher avec la syntaxe IMAP |
+| `list_emails` | Lister les emails recents d'un dossier (avec preview optionnel) |
+| `read_email` | Lire un email (format text/html/both, suppression des quotes) |
+| `read_emails` | Lire plusieurs emails en batch (un seul appel IMAP) |
+| `search_emails` | Rechercher avec la syntaxe IMAP (avec preview optionnel) |
 | `mark_as_read` | Marquer un email comme lu |
 | `mark_as_unread` | Marquer un email comme non lu |
 | `move_email` | Deplacer un email vers un autre dossier |
@@ -100,6 +107,14 @@ Override du chemin : `EXCHANGE_MCP_CONFIG=/chemin/vers/config.json`
 | `EXCHANGE_MCP_CONFIG` | Fichier de configuration | `~/.config/exchange-mcp/config.json` |
 | `EXCHANGE_MCP_OAUTH_DB` | Base SQLite OAuth 2.1 | `~/.local/share/exchange-mcp/oauth2.db` |
 
+#### Securite
+
+| Variable | Description | Defaut |
+|----------|-------------|--------|
+| `EXCHANGE_MCP_ENCRYPTION_KEY` | Cle AES-256 en base64 (32 octets) pour chiffrer les credentials | Auto-generee dans `oauth2.key` |
+
+> Si aucune cle n'est fournie, une cle est generee automatiquement et stockee dans un fichier `.key` a cote de la base SQLite. Les mots de passe existants en clair sont migres automatiquement lors de la prochaine lecture.
+
 #### Logging
 
 | Variable | Description | Defaut |
@@ -163,19 +178,35 @@ Lister les emails recents d'un dossier.
 |-----------|------|--------|--------|-------------|
 | `folder` | string | oui | — | Nom du dossier (ex: `"INBOX"`, `"Sent Items"`) |
 | `limit` | entier | non | 20 | Nombre max d'emails |
+| `include_preview` | bool | non | false | Inclure un snippet texte (~200 cars) pour chaque email |
 
-**Retour :** liste de `{ uid, subject, from, date, flags, size }`
+**Retour :** liste de `{ uid, subject, from, date, flags, size, snippet? }`
 
 ### read_email
 
-Lire le contenu complet d'un email.
+Lire le contenu complet d'un email. Ne marque PAS l'email comme lu.
 
-| Parametre | Type | Requis | Description |
-|-----------|------|--------|-------------|
-| `folder` | string | oui | Dossier contenant l'email |
-| `uid` | entier | oui | UID de l'email |
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `folder` | string | oui | — | Dossier contenant l'email |
+| `uid` | entier | oui | — | UID de l'email |
+| `format` | string | non | `"text"` | `"text"` (defaut, pas de HTML), `"html"`, ou `"both"` |
+| `strip_quotes` | bool | non | true | Supprimer les reponses citees (apres `---`, `De:`, `>`, etc.) |
 
-**Retour :** `{ uid, subject, from, to, cc, date, flags, body_text, body_html, attachments }`
+**Retour :** `{ uid, subject, from, to, cc, date, flags, body_text, body_html?, attachments }`
+
+### read_emails
+
+Lire plusieurs emails en un seul appel (batch). Utilise une seule connexion IMAP.
+
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `folder` | string | oui | — | Dossier contenant les emails |
+| `uids` | entier[] | oui | — | Liste des UIDs a lire |
+| `format` | string | non | `"text"` | `"text"`, `"html"`, ou `"both"` |
+| `strip_quotes` | bool | non | true | Supprimer les reponses citees |
+
+**Retour :** liste de `{ uid, subject, from, to, cc, date, flags, body_text, body_html?, attachments }`
 
 ### search_emails
 
@@ -186,8 +217,9 @@ Rechercher des emails avec la syntaxe IMAP.
 | `folder` | string | oui | — | Dossier dans lequel chercher |
 | `query` | string | oui | — | Requete IMAP (ex: `UNSEEN`, `FROM "user@ex.com"`, `SUBJECT "reunion"`) |
 | `limit` | entier | non | 20 | Nombre max de resultats |
+| `include_preview` | bool | non | false | Inclure un snippet texte (~200 cars) pour chaque email |
 
-**Retour :** liste de `{ uid, subject, from, date, flags, size }`
+**Retour :** liste de `{ uid, subject, from, date, flags, size, snippet? }`
 
 ### mark_as_read / mark_as_unread
 
@@ -232,20 +264,22 @@ Rechercher des emails avec la syntaxe IMAP.
 
 ```
 src/
-├── main.rs             # Point d'entree, demarrage serveur HTTP
+├── main.rs             # Point d'entree, demarrage serveur HTTP + init crypto
 ├── config.rs           # Chargement configuration (fichier + env)
-├── server.rs           # Definition des outils MCP
+├── server.rs           # Definition des 11 outils MCP
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
+├── cache.rs            # Cache en memoire avec TTL (dossiers, listes, details, statuts)
+├── crypto.rs           # Chiffrement AES-256-GCM des credentials
 ├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token
 ├── session.rs          # Store de sessions multi-utilisateur
 ├── oauth/
 │   ├── mod.rs          # OAuth2State + re-exports
 │   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
-│   └── store.rs        # Store SQLite (clients, auth codes, tokens)
+│   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions chiffrees)
 └── imap/
-    ├── mod.rs          # Re-exports (ImapClient, html_to_text)
-    ├── client.rs       # Operations IMAP (connexion, lecture, recherche, flags)
-    └── parse.rs        # Parsing email (MIME, RFC 2047, HTML-to-text)
+    ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
+    ├── client.rs       # Operations IMAP (connexion, lecture, batch, recherche, flags, cache)
+    └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 
 ## Licence

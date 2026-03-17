@@ -41,6 +41,12 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 rand = "0.9"
 url = "2"
 
+# Credential encryption
+aes-gcm = "0.10"
+
+# Charset conversion (RFC 2047)
+encoding_rs = "0.8"
+
 # Utils
 async-trait = "0.1"
 anyhow = "1"

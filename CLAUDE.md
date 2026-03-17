@@ -13,6 +13,8 @@ OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 - **imap** v2 — client IMAP (sync, utilise via `spawn_blocking`)
 - **rusqlite** v0.34 (bundled) — stockage OAuth2
 - **tower** v0.5 — middleware de service
+- **aes-gcm** v0.10 — chiffrement AES-256-GCM des credentials
+- **encoding_rs** v0.8 — conversion charset (RFC 2047 : iso-8859-1, windows-1252, etc.)
 
 ## Architecture des fichiers
 
@@ -23,18 +25,20 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*
-├── server.rs           # ExchangeMcpServer + 10 outils MCP
+├── server.rs           # ExchangeMcpServer + 11 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
+├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
+├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
 ├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token
 ├── session.rs          # SessionStore — HashMap<token, UserSession>
 ├── oauth/
 │   ├── mod.rs          # OAuth2State + re-exports
 │   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
-│   └── store.rs        # Store SQLite (clients, auth codes, tokens)
+│   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions chiffrees)
 └── imap/
-    ├── mod.rs          # Re-exports (ImapClient, html_to_text)
-    ├── client.rs       # ImapClient — connexion, lecture, recherche, flags
-    └── parse.rs        # Parsing email (MIME, RFC 2047, HTML-to-text)
+    ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache
+    └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 
 ## Flux de donnees
@@ -62,7 +66,9 @@ Client MCP
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
 - **Tokens** : generes via `base64(random_bytes)` URL-safe sans padding
 - **Sessions** : UUID v4 comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts
+- **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite. Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`
 - **Auth** : uniquement login/password IMAP (pas d'OAuth2 Microsoft cote IMAP)
+- **Cache** : cache en memoire par utilisateur avec TTL (dossiers 5min, listes 2min, details 10min, statut 1min). Invalide automatiquement lors des operations d'ecriture
 
 ## Points d'attention
 
@@ -71,6 +77,10 @@ Client MCP
 - `SessionStore::sessions_blocking_read()` est utilise dans la factory MCP (contexte sync) — ne pas remplacer par la version async
 - Les auth codes OAuth expirent en 10 minutes, les access tokens en 1 heure
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
+- `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus
+- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread)
+- `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
+- Les mots de passe existants en clair sont migres automatiquement (detection via `is_encrypted()`) lors de la lecture
 
 ## Variables d'environnement
 
@@ -80,6 +90,7 @@ Voir la section complete dans le README.md. Les plus importantes :
 - `EXCHANGE_MCP_SSE_HOST` / `EXCHANGE_MCP_SSE_PORT` — adresse d'ecoute HTTP
 - `EXCHANGE_MCP_ISSUER` — URL publique du serveur (derriere un proxy)
 - `EXCHANGE_MCP_OAUTH_DB` — chemin de la base SQLite OAuth2
+- `EXCHANGE_MCP_ENCRYPTION_KEY` — cle AES-256 en base64 (optionnel, generee auto si absente)
 - `RUST_LOG` — niveau de log
 
 ## Docker

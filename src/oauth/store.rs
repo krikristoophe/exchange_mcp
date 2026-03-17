@@ -298,19 +298,21 @@ impl OAuth2Store {
     }
 
     /// Remove tokens and auth codes that reference sessions no longer in the store.
+    /// Preserves expired access tokens for valid sessions so that refresh tokens
+    /// remain usable across server restarts.
     pub fn cleanup_orphaned_tokens(&self, valid_session_tokens: &[String]) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
 
-        // Clean expired first
+        // Clean expired/used auth codes (always safe — they are single-use)
         conn.execute(
             "DELETE FROM oauth_auth_codes WHERE expires_at <= ?1 OR used = 1",
             params![now],
         )?;
-        conn.execute(
-            "DELETE FROM oauth_tokens WHERE expires_at <= ?1",
-            params![now],
-        )?;
+
+        // Do NOT unconditionally delete expired access tokens here.
+        // The refresh_token lives on the same row — deleting the row kills
+        // the client's ability to refresh after a server restart.
 
         if valid_session_tokens.is_empty() {
             let deleted_tokens = conn.execute("DELETE FROM oauth_tokens", [])?;
@@ -329,6 +331,9 @@ impl OAuth2Store {
                 .collect::<Vec<_>>()
                 .join(",");
 
+            // Delete tokens for sessions that no longer exist (orphaned).
+            // Tokens for valid sessions are kept — even if the access_token
+            // is expired — so the refresh_token can still be exchanged.
             let sql_tokens = format!(
                 "DELETE FROM oauth_tokens WHERE session_token NOT IN ({placeholders})"
             );

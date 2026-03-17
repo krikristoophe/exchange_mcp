@@ -633,6 +633,54 @@ impl ImapClient {
         .await?
     }
 
+    /// Send a draft email: fetch it from Drafts, send via SMTP, save to Sent Items,
+    /// then delete the draft from the Drafts folder.
+    pub async fn send_draft(&self, uid: u32) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let smtp_host = self.smtp_host.clone();
+        let smtp_port = self.smtp_port;
+        let cache = self.cache.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // 1. Fetch the draft's raw RFC822 content
+            let mut session = Self::connect_sync(&host, port, ImapCredentials {
+                username: credentials.username.clone(),
+                password: credentials.password.clone(),
+            })?;
+            session.select("Drafts")?;
+            let messages = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+            let msg = messages.iter().next().context("Draft not found")?;
+            let rfc822 = msg.body().context("No message body")?.to_vec();
+            drop(messages);
+
+            // 2. Send via SMTP and save to Sent Items
+            Self::send_smtp_and_save(
+                &smtp_host, smtp_port,
+                &host, port,
+                &credentials,
+                &rfc822,
+            )?;
+
+            // 3. Delete the draft
+            session.uid_store(uid.to_string(), "+FLAGS (\\Deleted)")?;
+            session.expunge()?;
+            session.logout()?;
+
+            cache.invalidate_folder("Drafts");
+            cache.invalidate_folder("Sent Items");
+
+            Ok("Draft sent and removed from Drafts folder".to_string())
+        })
+        .await?
+    }
+
+    /// Delete a draft email from the Drafts folder (moves to Deleted Items).
+    pub async fn delete_draft(&self, uid: u32) -> Result<()> {
+        self.move_email("Drafts", uid, "Deleted Items").await
+    }
+
     /// Send an email via SMTP and save to Sent Items.
     pub async fn send_email(
         &self,

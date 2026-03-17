@@ -421,6 +421,66 @@ impl ImapClient {
         .await?
     }
 
+    /// Create a new mailbox folder
+    pub async fn create_folder(&self, folder: &str) -> Result<()> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.create(&folder)?;
+            session.logout()?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        self.cache.invalidate_folders_list();
+        Ok(())
+    }
+
+    /// Rename (move) a mailbox folder
+    pub async fn rename_folder(&self, folder: &str, new_name: &str) -> Result<()> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder_owned = folder.to_string();
+        let new_name = new_name.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.rename(&folder_owned, &new_name)?;
+            session.logout()?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        self.cache.invalidate_folders_list();
+        self.cache.invalidate_folder(folder);
+        Ok(())
+    }
+
+    /// Delete a mailbox folder
+    pub async fn delete_folder(&self, folder: &str) -> Result<()> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder_owned = folder.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.delete(&folder_owned)?;
+            session.logout()?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+
+        self.cache.invalidate_folders_list();
+        self.cache.invalidate_folder(folder);
+        Ok(())
+    }
+
     /// Mark an email as read
     pub async fn mark_as_read(&self, folder: &str, uid: u32) -> Result<()> {
         self.store_flag(folder, uid, "+FLAGS (\\Seen)").await?;

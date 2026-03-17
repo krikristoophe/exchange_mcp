@@ -37,6 +37,9 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | `delete_email` | Supprimer (deplace vers Deleted Items) |
 | `set_flag` | Ajouter/retirer un flag IMAP |
 | `folder_status` | Stats d'un dossier (total, non lus, recents) |
+| `create_folder` | Creer un nouveau dossier |
+| `rename_folder` | Renommer un dossier |
+| `delete_folder` | Supprimer un dossier |
 | `create_draft` | Creer un brouillon dans le dossier Drafts (retourne l'UID) |
 | `update_draft` | Modifier un brouillon existant (retourne le nouvel UID) |
 | `send_draft` | Envoyer un brouillon existant (supprime le brouillon apres envoi, retourne l'UID dans Sent Items) |
@@ -275,6 +278,31 @@ Rechercher des emails avec la syntaxe IMAP.
 | `folder` | string | oui | Nom du dossier |
 
 **Retour :** `{ name, total, unseen, recent }`
+
+### create_folder
+
+Creer un nouveau dossier. Utiliser le separateur de chemin (generalement '/') pour creer des sous-dossiers.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Nom du dossier a creer (ex: "Projects", "INBOX/Subfolder") |
+
+### rename_folder
+
+Renommer un dossier existant. Peut aussi etre utilise pour deplacer un dossier en changeant son chemin.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Nom actuel du dossier |
+| `new_name` | string | oui | Nouveau nom du dossier |
+
+### delete_folder
+
+Supprimer un dossier. Le dossier doit etre vide ou le serveur doit supporter la suppression recursive.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Nom du dossier a supprimer |
 
 ### create_draft
 

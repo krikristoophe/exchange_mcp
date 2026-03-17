@@ -180,6 +180,13 @@ impl EmailCache {
         }
     }
 
+    /// Invalidate the cached folder list (after create/rename/delete folder).
+    pub fn invalidate_folders_list(&self) {
+        if let Ok(mut guard) = self.folders.write() {
+            *guard = None;
+        }
+    }
+
     /// Invalidate a specific email detail (after flag change).
     pub fn invalidate_detail(&self, folder: &str, uid: u32) {
         if let Ok(mut guard) = self.details.write() {

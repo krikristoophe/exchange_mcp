@@ -186,6 +186,26 @@ pub struct FolderStatusParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateFolderParams {
+    /// Name of the folder to create (e.g., "Projects", "INBOX/Subfolder")
+    pub folder: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RenameFolderParams {
+    /// Current folder name
+    pub folder: String,
+    /// New folder name
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteFolderParams {
+    /// Name of the folder to delete
+    pub folder: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateDraftParams {
     /// Recipient email addresses
     pub to: Vec<String>,
@@ -509,6 +529,30 @@ impl ExchangeMcpServer {
         }
     }
 
+    #[tool(description = "Create a new mailbox folder. Use a path separator (usually '/') to create subfolders (e.g., 'INBOX/Projects').")]
+    async fn create_folder(&self, Parameters(params): Parameters<CreateFolderParams>) -> String {
+        match self.imap.create_folder(&params.folder).await {
+            Ok(()) => format!("Folder '{}' created", params.folder),
+            Err(e) => format!("Error creating folder: {e}"),
+        }
+    }
+
+    #[tool(description = "Rename a mailbox folder. Can also be used to move a folder by changing its path.")]
+    async fn rename_folder(&self, Parameters(params): Parameters<RenameFolderParams>) -> String {
+        match self.imap.rename_folder(&params.folder, &params.new_name).await {
+            Ok(()) => format!("Folder '{}' renamed to '{}'", params.folder, params.new_name),
+            Err(e) => format!("Error renaming folder: {e}"),
+        }
+    }
+
+    #[tool(description = "Delete a mailbox folder. The folder must be empty or the server must support recursive deletion. Use with caution.")]
+    async fn delete_folder(&self, Parameters(params): Parameters<DeleteFolderParams>) -> String {
+        match self.imap.delete_folder(&params.folder).await {
+            Ok(()) => format!("Folder '{}' deleted", params.folder),
+            Err(e) => format!("Error deleting folder: {e}"),
+        }
+    }
+
     #[tool(
         description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it.",
         meta = ui_meta(EMAIL_PREVIEW_URI)
@@ -698,6 +742,7 @@ impl ServerHandler for ExchangeMcpServer {
                  Use send_email to send a new email, reply_email to respond to an email, \
                  forward_email to forward an email, and list_contacts to discover contacts \
                  from recent emails. \
+                 Use create_folder, rename_folder, delete_folder to manage mailbox folders. \
                  Use list_calendar_events to browse calendar events (with optional date range filter), \
                  read_calendar_event to get full event details (attendees, description, recurrence), \
                  and search_calendar_events to find events by text query.",

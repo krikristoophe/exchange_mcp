@@ -77,6 +77,15 @@ impl OAuth2Store {
                 client_id       TEXT NOT NULL,
                 session_token   TEXT NOT NULL,
                 expires_at      INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_token   TEXT PRIMARY KEY,
+                email           TEXT NOT NULL,
+                password        TEXT NOT NULL,
+                imap_host       TEXT NOT NULL,
+                imap_port       INTEGER NOT NULL,
+                created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );",
         )?;
 
@@ -269,20 +278,116 @@ impl OAuth2Store {
         Ok(())
     }
 
-    /// Clear all tokens and auth codes.
-    ///
-    /// Called on server startup because sessions are in-memory only:
-    /// after a restart, all session tokens referenced by OAuth tokens are invalid.
-    /// Clients must re-authenticate through the OAuth flow.
-    pub fn clear_all_tokens(&self) -> anyhow::Result<()> {
+    /// Remove tokens and auth codes that reference sessions no longer in the store.
+    pub fn cleanup_orphaned_tokens(&self, valid_session_tokens: &[String]) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
-        let deleted_tokens = conn.execute("DELETE FROM oauth_tokens", [])?;
-        let deleted_codes = conn.execute("DELETE FROM oauth_auth_codes", [])?;
-        if deleted_tokens > 0 || deleted_codes > 0 {
-            tracing::info!(
-                "Cleared {deleted_tokens} token(s) and {deleted_codes} auth code(s) from previous session"
+        let now = chrono::Utc::now().timestamp();
+
+        // Clean expired first
+        conn.execute(
+            "DELETE FROM oauth_auth_codes WHERE expires_at <= ?1 OR used = 1",
+            params![now],
+        )?;
+        conn.execute(
+            "DELETE FROM oauth_tokens WHERE expires_at <= ?1",
+            params![now],
+        )?;
+
+        if valid_session_tokens.is_empty() {
+            let deleted_tokens = conn.execute("DELETE FROM oauth_tokens", [])?;
+            let deleted_codes = conn.execute("DELETE FROM oauth_auth_codes", [])?;
+            if deleted_tokens > 0 || deleted_codes > 0 {
+                tracing::info!(
+                    "Cleared {deleted_tokens} orphaned token(s) and {deleted_codes} auth code(s)"
+                );
+            }
+        } else {
+            // Build a comma-separated list of placeholders
+            let placeholders: String = valid_session_tokens
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let sql_tokens = format!(
+                "DELETE FROM oauth_tokens WHERE session_token NOT IN ({placeholders})"
             );
+            let sql_codes = format!(
+                "DELETE FROM oauth_auth_codes WHERE session_token NOT IN ({placeholders})"
+            );
+
+            let sql_params: Vec<&dyn rusqlite::types::ToSql> = valid_session_tokens
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let deleted_tokens = conn.execute(&sql_tokens, sql_params.as_slice())?;
+            let deleted_codes = conn.execute(&sql_codes, sql_params.as_slice())?;
+            if deleted_tokens > 0 || deleted_codes > 0 {
+                tracing::info!(
+                    "Cleared {deleted_tokens} orphaned token(s) and {deleted_codes} auth code(s)"
+                );
+            }
         }
+
         Ok(())
     }
+
+    // -- Session persistence --
+
+    pub fn persist_session(&self, session: &PersistedSession) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (session_token, email, password, imap_host, imap_port)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session.session_token,
+                session.email,
+                session.password,
+                session.imap_host,
+                session.imap_port,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_all_sessions(&self) -> anyhow::Result<Vec<PersistedSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_token, email, password, imap_host, imap_port FROM sessions",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PersistedSession {
+                session_token: row.get(0)?,
+                email: row.get(1)?,
+                password: row.get(2)?,
+                imap_host: row.get(3)?,
+                imap_port: row.get(4)?,
+            })
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        Ok(sessions)
+    }
+
+    pub fn delete_session(&self, session_token: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM sessions WHERE session_token = ?1",
+            params![session_token],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedSession {
+    pub session_token: String,
+    pub email: String,
+    pub password: String,
+    pub imap_host: String,
+    pub imap_port: u16,
 }

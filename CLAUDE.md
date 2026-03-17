@@ -61,7 +61,7 @@ Client MCP
 - **Gestion d'erreur** : `anyhow::Result` partout, pas de `unwrap()` sur du code faillible
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
 - **Tokens** : generes via `base64(random_bytes)` URL-safe sans padding
-- **Sessions** : UUID v4 comme cle, stockees dans un `RwLock<HashMap>`
+- **Sessions** : UUID v4 comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts
 - **Auth** : uniquement login/password IMAP (pas d'OAuth2 Microsoft cote IMAP)
 
 ## Points d'attention
@@ -70,7 +70,7 @@ Client MCP
 - `CURRENT_USER_TOKEN` est un `task_local!` — doit etre scope dans la future avant d'appeler le service MCP
 - `SessionStore::sessions_blocking_read()` est utilise dans la factory MCP (contexte sync) — ne pas remplacer par la version async
 - Les auth codes OAuth expirent en 10 minutes, les access tokens en 1 heure
-- Le cleanup des tokens expires se fait au demarrage du serveur uniquement
+- Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
 
 ## Variables d'environnement
 

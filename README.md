@@ -26,6 +26,33 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 
 ## Installation
 
+### Avec Docker (recommande)
+
+```bash
+# Copier et editer les variables d'environnement
+cp .env.example .env
+
+# Lancer la stack
+docker compose up -d
+```
+
+Le serveur est accessible sur `http://localhost:3000/mcp`.
+
+La base SQLite OAuth2 est stockee dans `./data/oauth2.db` (persistant entre les redemarrages).
+
+```bash
+# Voir les logs
+docker compose logs -f
+
+# Arreter
+docker compose down
+
+# Rebuild apres une mise a jour du code
+docker compose up -d --build
+```
+
+### Build natif
+
 ```bash
 cargo build --release
 ```

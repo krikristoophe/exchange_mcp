@@ -1,4 +1,6 @@
 /target
 *.env
+!.env.example
 config.json
 token_cache.json
+/data

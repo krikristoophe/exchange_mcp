@@ -43,6 +43,9 @@ pub struct ListEmailsParams {
     pub folder: String,
     /// Maximum number of emails to return (default: 20)
     pub limit: Option<u32>,
+    /// Include a short text preview/snippet for each email (default: false). Slightly slower but avoids needing to read each email individually.
+    #[serde(default)]
+    pub include_preview: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -51,6 +54,26 @@ pub struct ReadEmailParams {
     pub folder: String,
     /// UID of the email to read
     pub uid: u32,
+    /// Response format: "text" (default, text only), "html" (HTML only), "both" (text + HTML)
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Strip quoted replies (previous messages in the thread). Default: true
+    #[serde(default)]
+    pub strip_quotes: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadEmailsParams {
+    /// Folder containing the emails
+    pub folder: String,
+    /// List of UIDs to read
+    pub uids: Vec<u32>,
+    /// Response format: "text" (default, text only), "html" (HTML only), "both" (text + HTML)
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Strip quoted replies (previous messages in the thread). Default: true
+    #[serde(default)]
+    pub strip_quotes: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -61,6 +84,9 @@ pub struct SearchEmailsParams {
     pub query: String,
     /// Maximum number of results (default: 20)
     pub limit: Option<u32>,
+    /// Include a short text preview/snippet for each email (default: false)
+    #[serde(default)]
+    pub include_preview: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -107,6 +133,43 @@ pub struct FolderStatusParams {
     pub folder: String,
 }
 
+/// Post-process an email detail according to format and strip_quotes options.
+fn process_email_detail(
+    mut email: crate::imap::client::EmailDetail,
+    format: Option<&str>,
+    strip_quotes: bool,
+) -> crate::imap::client::EmailDetail {
+    let format = format.unwrap_or("text");
+
+    // If no plain text body but HTML exists, convert HTML to text
+    if email.body_text.is_empty() || email.body_text == "(no body)" {
+        if let Some(ref html) = email.body_html {
+            email.body_text = crate::imap::html_to_text(html);
+        }
+    }
+
+    // Strip quoted replies if requested
+    if strip_quotes {
+        email.body_text = crate::imap::strip_quoted_replies(&email.body_text);
+    }
+
+    // Apply format filter
+    match format {
+        "html" => {
+            email.body_text = String::new();
+        }
+        "both" => {
+            // Keep both as-is
+        }
+        _ => {
+            // "text" (default) — remove HTML to save tokens
+            email.body_html = None;
+        }
+    }
+
+    email
+}
+
 #[tool_router]
 impl ExchangeMcpServer {
     #[tool(description = "List all mailbox folders (INBOX, Sent Items, Drafts, etc.)")]
@@ -117,35 +180,48 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "List recent emails in a folder. Returns subject, from, date, flags for each email.")]
+    #[tool(description = "List recent emails in a folder. Returns subject, from, date, flags, size for each email. Use include_preview=true to also get a short text snippet (first ~200 chars) without reading the full email.")]
     async fn list_emails(&self, Parameters(params): Parameters<ListEmailsParams>) -> String {
-        match self.imap.list_emails(&params.folder, params.limit).await {
+        let include_preview = params.include_preview.unwrap_or(false);
+        match self.imap.list_emails(&params.folder, params.limit, include_preview).await {
             Ok(emails) => serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string()),
             Err(e) => format!("Error listing emails: {e}"),
         }
     }
 
-    #[tool(description = "Read the full content of an email including body, headers, attachments info. HTML is auto-converted to readable text if no plain text version exists.")]
+    #[tool(description = "Read the full content of a single email. By default returns text only (no HTML) with quoted replies stripped to minimize token usage. Use format=\"both\" to include HTML, and strip_quotes=false to keep full thread. Does NOT mark the email as read.")]
     async fn read_email(&self, Parameters(params): Parameters<ReadEmailParams>) -> String {
         match self.imap.read_email(&params.folder, params.uid).await {
-            Ok(mut email) => {
-                // If no plain text body but HTML exists, convert HTML to text
-                if email.body_text.is_empty() || email.body_text == "(no body)" {
-                    if let Some(ref html) = email.body_html {
-                        email.body_text = crate::imap::html_to_text(html);
-                    }
-                }
+            Ok(email) => {
+                let strip = params.strip_quotes.unwrap_or(true);
+                let email = process_email_detail(email, params.format.as_deref(), strip);
                 serde_json::to_string_pretty(&email).unwrap_or_else(|e| e.to_string())
             }
             Err(e) => format!("Error reading email: {e}"),
         }
     }
 
-    #[tool(description = "Search emails in a folder using IMAP search criteria. Examples: UNSEEN, FROM \"user@example.com\", SUBJECT \"meeting\", SINCE 01-Jan-2024")]
+    #[tool(description = "Read multiple emails at once by their UIDs (batch). More efficient than calling read_email multiple times. Same format and strip_quotes options apply. Does NOT mark emails as read.")]
+    async fn read_emails(&self, Parameters(params): Parameters<ReadEmailsParams>) -> String {
+        match self.imap.read_emails(&params.folder, &params.uids).await {
+            Ok(emails) => {
+                let strip = params.strip_quotes.unwrap_or(true);
+                let processed: Vec<_> = emails
+                    .into_iter()
+                    .map(|e| process_email_detail(e, params.format.as_deref(), strip))
+                    .collect();
+                serde_json::to_string_pretty(&processed).unwrap_or_else(|e| e.to_string())
+            }
+            Err(e) => format!("Error reading emails: {e}"),
+        }
+    }
+
+    #[tool(description = "Search emails in a folder using IMAP search criteria. Examples: UNSEEN, FROM \"user@example.com\", SUBJECT \"meeting\", SINCE 01-Jan-2024. Use include_preview=true for text snippets.")]
     async fn search_emails(&self, Parameters(params): Parameters<SearchEmailsParams>) -> String {
+        let include_preview = params.include_preview.unwrap_or(false);
         match self
             .imap
-            .search_emails(&params.folder, &params.query, params.limit)
+            .search_emails(&params.folder, &params.query, params.limit, include_preview)
             .await
         {
             Ok(emails) => serde_json::to_string_pretty(&emails).unwrap_or_else(|e| e.to_string()),
@@ -217,7 +293,10 @@ impl ServerHandler for ExchangeMcpServer {
             .with_instructions(
                 "Exchange MCP Server - Access Microsoft Exchange emails via IMAP. \
                  Use list_folders to discover available folders, list_emails to browse, \
-                 read_email to read full content, and search_emails to find specific messages.",
+                 read_email to read full content, read_emails to read multiple at once, \
+                 and search_emails to find specific messages. \
+                 Reading emails does NOT mark them as read. \
+                 Use include_preview=true on list/search to get text snippets without reading full emails.",
             )
     }
 

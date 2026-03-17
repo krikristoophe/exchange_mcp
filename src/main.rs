@@ -1,5 +1,7 @@
 mod auth;
+mod cache;
 mod config;
+mod crypto;
 mod imap;
 mod middleware;
 mod oauth;
@@ -34,6 +36,10 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting Exchange MCP Server");
+
+    // Initialize encryption for credential storage
+    crypto::init_cipher()?;
+    tracing::info!("Credential encryption initialized");
 
     let config = config::Config::load()?;
     start_http_server(config).await

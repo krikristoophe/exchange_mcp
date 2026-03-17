@@ -2,12 +2,14 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::auth::{AuthProvider, ImapCredentials};
+use crate::cache::EmailCache;
 use super::parse;
 
 pub struct ImapClient {
     auth: Arc<dyn AuthProvider>,
     host: String,
     port: u16,
+    cache: Arc<EmailCache>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -25,6 +27,8 @@ pub struct EmailSummary {
     pub date: String,
     pub flags: Vec<String>,
     pub size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -37,6 +41,7 @@ pub struct EmailDetail {
     pub date: String,
     pub flags: Vec<String>,
     pub body_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body_html: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
 }
@@ -58,7 +63,12 @@ pub struct FolderStatus {
 
 impl ImapClient {
     pub fn new(auth: Arc<dyn AuthProvider>, host: String, port: u16) -> Self {
-        Self { auth, host, port }
+        Self {
+            auth,
+            host,
+            port,
+            cache: Arc::new(EmailCache::new()),
+        }
     }
 
     /// Connect and authenticate to IMAP (blocking, call via spawn_blocking)
@@ -79,9 +89,15 @@ impl ImapClient {
 
     /// List all mailbox folders
     pub async fn list_folders(&self) -> Result<Vec<FolderInfo>> {
+        // Check cache
+        if let Some(cached) = self.cache.get_folders() {
+            return Ok(cached);
+        }
+
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
+        let cache = self.cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
@@ -97,6 +113,7 @@ impl ImapClient {
                 .collect();
 
             session.logout()?;
+            cache.set_folders(folders.clone());
             Ok(folders)
         })
         .await?
@@ -107,17 +124,27 @@ impl ImapClient {
         &self,
         folder: &str,
         limit: Option<u32>,
+        include_preview: bool,
     ) -> Result<Vec<EmailSummary>> {
+        let limit_val = limit.unwrap_or(20);
+
+        // Check cache (only for non-preview requests to avoid stale snippets)
+        if !include_preview {
+            if let Some(cached) = self.cache.get_summaries(folder, limit_val) {
+                return Ok(cached);
+            }
+        }
+
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
         let folder = folder.to_string();
+        let cache = self.cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
             let mailbox = session.select(&folder)?;
 
-            let limit = limit.unwrap_or(20);
             let total = mailbox.exists;
 
             if total == 0 {
@@ -125,42 +152,147 @@ impl ImapClient {
                 return Ok(vec![]);
             }
 
-            let start = if total > limit { total - limit + 1 } else { 1 };
+            let start = if total > limit_val { total - limit_val + 1 } else { 1 };
             let range = format!("{start}:{total}");
 
-            let messages = session.fetch(&range, "(UID FLAGS ENVELOPE RFC822.SIZE)")?;
+            let fetch_items = if include_preview {
+                "(UID FLAGS ENVELOPE RFC822.SIZE BODY.PEEK[TEXT]<0.512>)"
+            } else {
+                "(UID FLAGS ENVELOPE RFC822.SIZE)"
+            };
+
+            let messages = session.fetch(&range, fetch_items)?;
 
             let summaries: Vec<EmailSummary> = messages
                 .iter()
-                .filter_map(|msg| parse::parse_email_summary(msg))
+                .filter_map(|msg| {
+                    let mut summary = parse::parse_email_summary(msg)?;
+                    if include_preview {
+                        summary.snippet = parse::extract_snippet(msg, 200);
+                    }
+                    Some(summary)
+                })
                 .collect();
 
             session.logout()?;
+            cache.set_summaries(&folder, limit_val, summaries.clone());
             Ok(summaries)
         })
         .await?
     }
 
-    /// Read a specific email by UID
+    /// Read a specific email by UID (uses BODY.PEEK[] to avoid marking as read)
     pub async fn read_email(&self, folder: &str, uid: u32) -> Result<EmailDetail> {
+        // Check cache
+        if let Some(cached) = self.cache.get_detail(folder, uid) {
+            return Ok(cached);
+        }
+
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
         let folder = folder.to_string();
+        let cache = self.cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
-            let messages = session.uid_fetch(uid.to_string(), "(UID FLAGS ENVELOPE BODY[])")?;
+            let messages = session.uid_fetch(uid.to_string(), "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
 
             let msg = messages.iter().next().context("Email not found")?;
             let detail = parse::parse_email_detail(msg)?;
 
             session.logout()?;
+            cache.set_detail(&folder, uid, detail.clone());
             Ok(detail)
         })
         .await?
+    }
+
+    /// Read multiple emails by UIDs in a single IMAP connection
+    pub async fn read_emails(&self, folder: &str, uids: &[u32]) -> Result<Vec<EmailDetail>> {
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Check cache for all UIDs, find which ones we need to fetch
+        let mut cached_details: Vec<(u32, EmailDetail)> = Vec::new();
+        let mut missing_uids: Vec<u32> = Vec::new();
+
+        for &uid in uids {
+            if let Some(detail) = self.cache.get_detail(folder, uid) {
+                cached_details.push((uid, detail));
+            } else {
+                missing_uids.push(uid);
+            }
+        }
+
+        // If all are cached, return them in order
+        if missing_uids.is_empty() {
+            let mut result: Vec<EmailDetail> = Vec::with_capacity(uids.len());
+            for &uid in uids {
+                if let Some((_, detail)) = cached_details.iter().find(|(u, _)| *u == uid) {
+                    result.push(detail.clone());
+                }
+            }
+            return Ok(result);
+        }
+
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder_owned = folder.to_string();
+        let cache = self.cache.clone();
+
+        let fetched = tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder_owned)?;
+
+            let uid_range: String = missing_uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let messages =
+                session.uid_fetch(&uid_range, "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
+
+            let mut details: Vec<EmailDetail> = Vec::new();
+            for msg in messages.iter() {
+                match parse::parse_email_detail(msg) {
+                    Ok(detail) => {
+                        cache.set_detail(&folder_owned, detail.uid, detail.clone());
+                        details.push(detail);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse email: {e}");
+                    }
+                }
+            }
+
+            session.logout()?;
+            Ok::<_, anyhow::Error>(details)
+        })
+        .await??;
+
+        // Merge cached + fetched, return in original UID order
+        let mut all_details = std::collections::HashMap::new();
+        for (uid, detail) in cached_details {
+            all_details.insert(uid, detail);
+        }
+        for detail in fetched {
+            all_details.insert(detail.uid, detail);
+        }
+
+        let mut result = Vec::with_capacity(uids.len());
+        for &uid in uids {
+            if let Some(detail) = all_details.remove(&uid) {
+                result.push(detail);
+            }
+        }
+
+        Ok(result)
     }
 
     /// Search emails in a folder
@@ -169,12 +301,23 @@ impl ImapClient {
         folder: &str,
         query: &str,
         limit: Option<u32>,
+        include_preview: bool,
     ) -> Result<Vec<EmailSummary>> {
+        let limit_val = limit.unwrap_or(20);
+
+        // Check cache
+        if !include_preview {
+            if let Some(cached) = self.cache.get_search(folder, query, limit_val) {
+                return Ok(cached);
+            }
+        }
+
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
         let folder = folder.to_string();
         let query = query.to_string();
+        let cache = self.cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
@@ -187,11 +330,10 @@ impl ImapClient {
                 return Ok(vec![]);
             }
 
-            let limit = limit.unwrap_or(20) as usize;
             let mut uid_vec: Vec<u32> = uids.into_iter().collect();
             uid_vec.sort_unstable();
             uid_vec.reverse();
-            uid_vec.truncate(limit);
+            uid_vec.truncate(limit_val as usize);
 
             let uid_range: String = uid_vec
                 .iter()
@@ -199,15 +341,27 @@ impl ImapClient {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            let messages =
-                session.uid_fetch(&uid_range, "(UID FLAGS ENVELOPE RFC822.SIZE)")?;
+            let fetch_items = if include_preview {
+                "(UID FLAGS ENVELOPE RFC822.SIZE BODY.PEEK[TEXT]<0.512>)"
+            } else {
+                "(UID FLAGS ENVELOPE RFC822.SIZE)"
+            };
+
+            let messages = session.uid_fetch(&uid_range, fetch_items)?;
 
             let summaries: Vec<EmailSummary> = messages
                 .iter()
-                .filter_map(|msg| parse::parse_email_summary(msg))
+                .filter_map(|msg| {
+                    let mut summary = parse::parse_email_summary(msg)?;
+                    if include_preview {
+                        summary.snippet = parse::extract_snippet(msg, 200);
+                    }
+                    Some(summary)
+                })
                 .collect();
 
             session.logout()?;
+            cache.set_search(&folder, &query, limit_val, summaries.clone());
             Ok(summaries)
         })
         .await?
@@ -215,10 +369,16 @@ impl ImapClient {
 
     /// Get folder status (total, unseen, recent)
     pub async fn get_folder_status(&self, folder: &str) -> Result<FolderStatus> {
+        // Check cache
+        if let Some(cached) = self.cache.get_status(folder) {
+            return Ok(cached);
+        }
+
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
         let folder = folder.to_string();
+        let cache = self.cache.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
@@ -237,6 +397,7 @@ impl ImapClient {
             };
 
             session.logout()?;
+            cache.set_status(&status.name, status.clone());
             Ok(status)
         })
         .await?
@@ -244,12 +405,18 @@ impl ImapClient {
 
     /// Mark an email as read
     pub async fn mark_as_read(&self, folder: &str, uid: u32) -> Result<()> {
-        self.store_flag(folder, uid, "+FLAGS (\\Seen)").await
+        self.store_flag(folder, uid, "+FLAGS (\\Seen)").await?;
+        self.cache.invalidate_detail(folder, uid);
+        self.cache.invalidate_folder(folder);
+        Ok(())
     }
 
     /// Mark an email as unread
     pub async fn mark_as_unread(&self, folder: &str, uid: u32) -> Result<()> {
-        self.store_flag(folder, uid, "-FLAGS (\\Seen)").await
+        self.store_flag(folder, uid, "-FLAGS (\\Seen)").await?;
+        self.cache.invalidate_detail(folder, uid);
+        self.cache.invalidate_folder(folder);
+        Ok(())
     }
 
     /// Move an email to another folder
@@ -257,21 +424,25 @@ impl ImapClient {
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let folder = folder.to_string();
-        let target_folder = target_folder.to_string();
+        let folder_owned = folder.to_string();
+        let target_owned = target_folder.to_string();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
-            session.select(&folder)?;
+            session.select(&folder_owned)?;
 
-            session.uid_copy(uid.to_string(), &target_folder)?;
+            session.uid_copy(uid.to_string(), &target_owned)?;
             session.uid_store(uid.to_string(), "+FLAGS (\\Deleted)")?;
             session.expunge()?;
 
             session.logout()?;
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })
-        .await?
+        .await??;
+
+        self.cache.invalidate_folder(folder);
+        self.cache.invalidate_folder(target_folder);
+        Ok(())
     }
 
     /// Delete an email (move to Deleted Items)
@@ -283,7 +454,10 @@ impl ImapClient {
     pub async fn set_flag(&self, folder: &str, uid: u32, flag: &str, add: bool) -> Result<()> {
         let op = if add { "+FLAGS" } else { "-FLAGS" };
         let query = format!("{op} ({flag})");
-        self.store_flag(folder, uid, &query).await
+        self.store_flag(folder, uid, &query).await?;
+        self.cache.invalidate_detail(folder, uid);
+        self.cache.invalidate_folder(folder);
+        Ok(())
     }
 
     async fn store_flag(&self, folder: &str, uid: u32, flag_cmd: &str) -> Result<()> {

@@ -35,7 +35,98 @@ pub fn parse_email_summary(msg: &imap::types::Fetch) -> Option<EmailSummary> {
         date,
         flags,
         size: msg.size,
+        snippet: None,
     })
+}
+
+/// Extract a text snippet from a partially fetched email body.
+/// Used with BODY.PEEK[TEXT]<0.N> fetches.
+pub fn extract_snippet(msg: &imap::types::Fetch, max_chars: usize) -> Option<String> {
+    let body = msg.body()?;
+    if body.is_empty() {
+        return None;
+    }
+
+    // Try to parse as MIME and extract plain text
+    let text = match mailparse::parse_mail(body) {
+        Ok(parsed) => {
+            let mut text_body = String::new();
+            extract_text_only(&parsed, &mut text_body);
+            if text_body.is_empty() {
+                // Fallback: if it's HTML, convert
+                let mut html_body = None;
+                extract_html_only(&parsed, &mut html_body);
+                if let Some(html) = html_body {
+                    super::html_to_text(&html)
+                } else {
+                    parsed.get_body().unwrap_or_default()
+                }
+            } else {
+                text_body
+            }
+        }
+        Err(_) => {
+            // Raw text fallback
+            String::from_utf8_lossy(body).to_string()
+        }
+    };
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Truncate to max_chars on a word boundary
+    let snippet = if trimmed.len() <= max_chars {
+        trimmed.to_string()
+    } else {
+        let truncated = &trimmed[..max_chars];
+        match truncated.rfind(' ') {
+            Some(pos) if pos > max_chars / 2 => format!("{}...", &truncated[..pos]),
+            _ => format!("{truncated}..."),
+        }
+    };
+
+    // Collapse whitespace
+    let snippet = snippet
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    Some(snippet)
+}
+
+fn extract_text_only(mail: &mailparse::ParsedMail, text_body: &mut String) {
+    if mail.subparts.is_empty() {
+        let content_type = mail.ctype.mimetype.to_lowercase();
+        if content_type.contains("text/plain") {
+            if let Ok(body) = mail.get_body() {
+                if !text_body.is_empty() {
+                    text_body.push('\n');
+                }
+                text_body.push_str(&body);
+            }
+        }
+    } else {
+        for part in &mail.subparts {
+            extract_text_only(part, text_body);
+        }
+    }
+}
+
+fn extract_html_only(mail: &mailparse::ParsedMail, html_body: &mut Option<String>) {
+    if mail.subparts.is_empty() {
+        let content_type = mail.ctype.mimetype.to_lowercase();
+        if content_type.contains("text/html") && html_body.is_none() {
+            if let Ok(body) = mail.get_body() {
+                *html_body = Some(body);
+            }
+        }
+    } else {
+        for part in &mail.subparts {
+            extract_html_only(part, html_body);
+        }
+    }
 }
 
 pub fn parse_email_detail(msg: &imap::types::Fetch) -> Result<EmailDetail> {
@@ -138,28 +229,38 @@ fn decode_rfc2047(s: &str) -> String {
             let encoded_word = &after_start[..end];
             let parts: Vec<&str> = encoded_word.splitn(3, '?').collect();
             if parts.len() == 3 {
+                let charset = parts[0];
                 let encoding = parts[1].to_uppercase();
                 let text = parts[2];
 
-                let decoded = match encoding.as_str() {
+                let raw_bytes = match encoding.as_str() {
                     "B" => base64::engine::general_purpose::STANDARD
                         .decode(text)
-                        .ok()
-                        .and_then(|bytes| String::from_utf8(bytes).ok()),
+                        .ok(),
                     "Q" => {
                         let text = text.replace('_', " ");
-                        quoted_printable_decode(&text)
+                        quoted_printable_decode_bytes(&text)
                     }
                     _ => None,
                 };
 
-                if let Some(decoded) = decoded {
+                if let Some(bytes) = raw_bytes {
+                    let decoded = decode_charset(charset, &bytes);
                     result.push_str(&decoded);
                 } else {
                     result.push_str(&remaining[start..start + 2 + end + 2]);
                 }
             }
             remaining = &after_start[end + 2..];
+            // Skip whitespace between consecutive encoded words (RFC 2047 section 6.2)
+            if remaining.starts_with(' ') || remaining.starts_with('\t') {
+                if let Some(next) = remaining.find("=?") {
+                    let between = &remaining[..next];
+                    if between.trim().is_empty() {
+                        remaining = &remaining[next..];
+                    }
+                }
+            }
         } else {
             result.push_str(&remaining[start..]);
             remaining = "";
@@ -169,7 +270,27 @@ fn decode_rfc2047(s: &str) -> String {
     result
 }
 
-fn quoted_printable_decode(s: &str) -> Option<String> {
+/// Decode raw bytes from a given charset to UTF-8, using encoding_rs.
+fn decode_charset(charset: &str, bytes: &[u8]) -> String {
+    let charset_lower = charset.to_lowercase();
+
+    // UTF-8 is already valid
+    if charset_lower == "utf-8" || charset_lower == "us-ascii" || charset_lower == "ascii" {
+        return String::from_utf8_lossy(bytes).to_string();
+    }
+
+    // Use encoding_rs for charset conversion
+    if let Some(encoding) = encoding_rs::Encoding::for_label(charset.as_bytes()) {
+        let (decoded, _, _) = encoding.decode(bytes);
+        decoded.into_owned()
+    } else {
+        // Fallback: lossy UTF-8
+        tracing::warn!("Unknown charset '{charset}', using lossy UTF-8");
+        String::from_utf8_lossy(bytes).to_string()
+    }
+}
+
+fn quoted_printable_decode_bytes(s: &str) -> Option<Vec<u8>> {
     let mut result = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -186,7 +307,7 @@ fn quoted_printable_decode(s: &str) -> Option<String> {
         result.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(result).ok()
+    Some(result)
 }
 
 fn parse_body(body: &[u8]) -> (String, Option<String>) {
@@ -307,7 +428,49 @@ fn extract_disposition_filename(disposition: &str) -> Option<String> {
     None
 }
 
-/// Simple HTML to text converter — strips tags and decodes common entities
+/// Strip quoted replies from email text body.
+/// Removes content after common reply markers.
+pub fn strip_quoted_replies(text: &str) -> String {
+    let mut result = String::new();
+    let mut in_quote = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Detect start of quoted content
+        if !in_quote {
+            // Common reply separators
+            if trimmed == "---"
+                || trimmed == "___"
+                || trimmed.starts_with("-----Original Message-----")
+                || trimmed.starts_with("________________________________")
+                || trimmed.starts_with("On ") && trimmed.ends_with("wrote:")
+                || trimmed.starts_with("Le ") && trimmed.ends_with("a ecrit :")
+                || trimmed.starts_with("Le ") && trimmed.ends_with("a ecrit:")
+                || trimmed.starts_with("De :") || trimmed.starts_with("De:")
+                || trimmed.starts_with("From:") && trimmed.contains("Sent:")
+                || trimmed.starts_with("> -----Original")
+            {
+                in_quote = true;
+                continue;
+            }
+
+            // Lines starting with > are quoted
+            if trimmed.starts_with('>') {
+                // Skip individual quoted lines but don't stop processing
+                continue;
+            }
+
+            result.push_str(line);
+            result.push('\n');
+        }
+        // Once in_quote is true, we skip all remaining lines
+    }
+
+    result.trim_end().to_string()
+}
+
+/// Simple HTML to text converter -- strips tags and decodes common entities
 pub fn html_to_text(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;

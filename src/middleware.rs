@@ -25,7 +25,7 @@ pub async fn security_headers(
     headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
     headers.insert(
         "Content-Security-Policy",
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
             .parse()
             .unwrap(),
     );

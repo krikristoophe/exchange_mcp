@@ -2,7 +2,7 @@
 
 ## Apercu du projet
 
-Serveur MCP en Rust pour acceder aux emails via IMAP et les envoyer via SMTP.
+Serveur MCP en Rust pour acceder aux emails et evenements de calendrier via IMAP et envoyer des emails via SMTP.
 Multi-utilisateur, OAuth 2.1 + PKCE, sessions IMAP isolees. Transport Streamable HTTP uniquement.
 
 ## Stack technique
@@ -28,7 +28,7 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
-├── server.rs           # ExchangeMcpServer + 19 outils MCP + resources UI (MCP Apps)
+├── server.rs           # ExchangeMcpServer + 22 outils MCP + resources UI (MCP Apps)
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -43,7 +43,8 @@ src/
 │   └── inbox_list.html     # Liste des emails interactive avec statut lu/non-lu
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
-    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts
+    ├── calendar.rs     # Parsing ICS/iCalendar (RFC 5545) — structures CalendarEvent/CalendarEventDetail, extraction MIME text/calendar
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts, calendrier
     └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 

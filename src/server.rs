@@ -268,6 +268,43 @@ pub struct ListContactsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListCalendarEventsParams {
+    /// Calendar folder name (default: "Calendar")
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Start date filter (inclusive). Accepts "yyyy-mm-dd" or "dd-Mon-yyyy" format (e.g., "2024-01-15" or "15-Jan-2024")
+    #[serde(default)]
+    pub start_date: Option<String>,
+    /// End date filter (exclusive). Accepts "yyyy-mm-dd" or "dd-Mon-yyyy" format
+    #[serde(default)]
+    pub end_date: Option<String>,
+    /// Maximum number of events to return (default: 50)
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadCalendarEventParams {
+    /// Calendar folder name (default: "Calendar")
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// UID of the calendar event to read
+    pub uid: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchCalendarEventsParams {
+    /// Text to search for in calendar events (matches subject, description, location, attendees)
+    pub query: String,
+    /// Calendar folder name (default: "Calendar")
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Maximum number of results (default: 20)
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ForwardParams {
     /// Folder containing the email to forward
     pub folder: String,
@@ -591,6 +628,47 @@ impl ExchangeMcpServer {
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error forwarding email: {e}"))])),
         }
     }
+
+    #[tool(description = "List calendar events from the Exchange Calendar folder. Optionally filter by date range (start_date/end_date in yyyy-mm-dd format). Returns subject, start/end times, location, organizer, and recurrence info for each event.")]
+    async fn list_calendar_events(&self, Parameters(params): Parameters<ListCalendarEventsParams>) -> String {
+        match self
+            .imap
+            .list_calendar_events(
+                params.folder.as_deref(),
+                params.start_date.as_deref(),
+                params.end_date.as_deref(),
+                params.limit,
+            )
+            .await
+        {
+            Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Error listing calendar events: {e}"),
+        }
+    }
+
+    #[tool(description = "Read the full details of a single calendar event by its UID. Returns subject, start/end times, location, organizer, attendees, description, recurrence rule, categories, and more.")]
+    async fn read_calendar_event(&self, Parameters(params): Parameters<ReadCalendarEventParams>) -> String {
+        match self
+            .imap
+            .read_calendar_event(params.folder.as_deref(), params.uid)
+            .await
+        {
+            Ok(detail) => serde_json::to_string_pretty(&detail).unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Error reading calendar event: {e}"),
+        }
+    }
+
+    #[tool(description = "Search calendar events by text query. Searches across event subject, description, location, and attendees. Returns matching events sorted by start date.")]
+    async fn search_calendar_events(&self, Parameters(params): Parameters<SearchCalendarEventsParams>) -> String {
+        match self
+            .imap
+            .search_calendar_events(params.folder.as_deref(), &params.query, params.limit)
+            .await
+        {
+            Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+            Err(e) => format!("Error searching calendar events: {e}"),
+        }
+    }
 }
 
 impl ServerHandler for ExchangeMcpServer {
@@ -609,7 +687,7 @@ impl ServerHandler for ExchangeMcpServer {
 
         ServerInfo::new(capabilities)
             .with_instructions(
-                "Exchange MCP Server - Access Microsoft Exchange emails via IMAP/SMTP. \
+                "Exchange MCP Server - Access Microsoft Exchange emails and calendar via IMAP/SMTP. \
                  Use list_folders to discover available folders, list_emails to browse, \
                  read_email to read full content, read_emails to read multiple at once, \
                  and search_emails to find specific messages. \
@@ -619,7 +697,10 @@ impl ServerHandler for ExchangeMcpServer {
                  send_draft to send it later, delete_draft to discard it. \
                  Use send_email to send a new email, reply_email to respond to an email, \
                  forward_email to forward an email, and list_contacts to discover contacts \
-                 from recent emails.",
+                 from recent emails. \
+                 Use list_calendar_events to browse calendar events (with optional date range filter), \
+                 read_calendar_event to get full event details (attendees, description, recurrence), \
+                 and search_calendar_events to find events by text query.",
             )
     }
 

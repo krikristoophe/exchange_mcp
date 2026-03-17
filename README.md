@@ -41,8 +41,8 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | `send_draft` | Envoyer un brouillon existant (supprime le brouillon apres envoi, retourne l'UID dans Sent Items) |
 | `delete_draft` | Supprimer un brouillon (deplace vers Deleted Items) |
 | `send_email` | Envoyer un email via SMTP (copie dans Sent Items, retourne l'UID) |
-| `reply` | Repondre a un email (avec citation, retourne l'UID dans Sent Items) |
-| `forward` | Transferer un email (retourne l'UID dans Sent Items) |
+| `reply_email` | Repondre a un email (avec citation, retourne l'UID dans Sent Items) |
+| `forward_email` | Transferer un email (retourne l'UID dans Sent Items) |
 | `list_contacts` | Lister les contacts extraits des emails recents |
 
 ## Installation
@@ -329,7 +329,7 @@ Envoyer un email via SMTP. Une copie est sauvegardee dans Sent Items.
 | `subject` | string | oui | Objet |
 | `body` | string | oui | Corps (texte brut) |
 
-### reply
+### reply_email
 
 Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
 
@@ -340,7 +340,7 @@ Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
 | `body` | string | oui | — | Corps de la reponse |
 | `reply_all` | bool | non | false | Repondre a tous |
 
-### forward
+### forward_email
 
 Transferer un email a de nouveaux destinataires.
 

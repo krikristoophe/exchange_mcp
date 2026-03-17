@@ -426,7 +426,7 @@ impl ExchangeMcpServer {
     }
 
     #[tool(description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients.")]
-    async fn reply(&self, Parameters(params): Parameters<ReplyParams>) -> String {
+    async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> String {
         let reply_all = params.reply_all.unwrap_or(false);
         match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all).await {
             Ok(msg) => msg,
@@ -446,7 +446,7 @@ impl ExchangeMcpServer {
     }
 
     #[tool(description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.")]
-    async fn forward(&self, Parameters(params): Parameters<ForwardParams>) -> String {
+    async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> String {
         match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body).await {
             Ok(msg) => msg,
             Err(e) => format!("Error forwarding email: {e}"),
@@ -466,8 +466,8 @@ impl ServerHandler for ExchangeMcpServer {
                  Use include_preview=true on list/search to get text snippets without reading full emails. \
                  Use create_draft to save a draft, update_draft to modify it, \
                  send_draft to send it later, delete_draft to discard it. \
-                 Use send_email to send a new email, reply to respond to an email, \
-                 forward to forward an email, and list_contacts to discover contacts \
+                 Use send_email to send a new email, reply_email to respond to an email, \
+                 forward_email to forward an email, and list_contacts to discover contacts \
                  from recent emails.",
             )
     }

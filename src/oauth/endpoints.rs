@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::auth::{AuthProvider, BasicAuthProvider};
-use crate::config::{DEFAULT_IMAP_HOST, DEFAULT_IMAP_PORT};
 use crate::imap::ImapClient;
 use crate::session::UserSession;
 use super::store::{AuthCode, RegisteredClient, StoredToken};
@@ -274,15 +273,15 @@ pub async fn authorize_post(
         return (StatusCode::BAD_REQUEST, "Invalid redirect_uri").into_response();
     }
 
-    // Test IMAP credentials
+    // Test IMAP credentials — use configured defaults (env/config) when not provided
     let email = form.email.clone();
     let password = form.password.clone();
     let imap_host = if form.imap_host.is_empty() {
-        DEFAULT_IMAP_HOST.to_string()
+        state.default_imap_host.clone()
     } else {
         form.imap_host.clone()
     };
-    let imap_port = if form.imap_port == 0 { DEFAULT_IMAP_PORT } else { form.imap_port };
+    let imap_port = if form.imap_port == 0 { state.default_imap_port } else { form.imap_port };
 
     let host = imap_host.clone();
     let port = imap_port;

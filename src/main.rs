@@ -60,6 +60,8 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         store: oauth2_store.clone(),
         sessions: session_store.clone(),
         issuer: issuer.clone(),
+        default_imap_host: config.imap_host.clone(),
+        default_imap_port: config.imap_port,
     });
 
     // MCP service — the factory reads CURRENT_USER_TOKEN task-local

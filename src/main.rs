@@ -80,7 +80,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             })?;
 
             let sessions = sessions_for_mcp.clone();
-            let guard = sessions.sessions_blocking_read();
+            let guard = sessions.sessions_read();
             match guard.get(&token) {
                 Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
                 None => Err(std::io::Error::new(

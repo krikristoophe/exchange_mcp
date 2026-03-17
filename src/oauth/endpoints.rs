@@ -317,8 +317,7 @@ pub async fn authorize_post(
                         imap_host,
                         imap_port,
                     },
-                )
-                .await;
+                );
 
             // Generate auth code
             let code = random_token(32);
@@ -604,7 +603,7 @@ async fn handle_refresh(state: Arc<OAuth2State>, req: TokenRequest) -> axum::res
     };
 
     // Verify session still exists
-    if !state.sessions.contains(&old_token.session_token).await {
+    if !state.sessions.contains(&old_token.session_token) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "invalid_grant", "error_description": "Session expired"})),

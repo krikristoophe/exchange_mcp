@@ -28,7 +28,7 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
-├── server.rs           # ExchangeMcpServer + 17 outils MCP
+├── server.rs           # ExchangeMcpServer + 19 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -40,7 +40,7 @@ src/
 │   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions, CSRF tokens)
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
-    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/send/delete)
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts
     └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 
@@ -94,7 +94,8 @@ Client MCP
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
 - Une tache periodique (toutes les 5 min) nettoie les sessions expirees et les tokens/codes orphelins
 - `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus
-- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread, create_draft, send, reply, forward)
+- Le cache est invalide automatiquement apres chaque operation d'ecriture (move, delete, set_flag, mark_as_read/unread, create_draft, update_draft, send, reply, forward)
+- Les outils create_draft, update_draft, send_draft, send_email, reply, forward retournent l'UID du message cree/envoye (JSON avec message + uid + folder)
 - `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
 - Les mots de passe existants en clair sont migres automatiquement (detection via `is_encrypted()`) lors de la lecture
 

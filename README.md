@@ -36,6 +36,12 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | `delete_email` | Supprimer (deplace vers Deleted Items) |
 | `set_flag` | Ajouter/retirer un flag IMAP |
 | `folder_status` | Stats d'un dossier (total, non lus, recents) |
+| `create_draft` | Creer un brouillon dans le dossier Drafts |
+| `send_draft` | Envoyer un brouillon existant (supprime le brouillon apres envoi) |
+| `delete_draft` | Supprimer un brouillon (deplace vers Deleted Items) |
+| `send_email` | Envoyer un email via SMTP (copie dans Sent Items) |
+| `reply` | Repondre a un email (avec citation) |
+| `forward` | Transferer un email |
 
 ## Installation
 
@@ -267,13 +273,74 @@ Rechercher des emails avec la syntaxe IMAP.
 
 **Retour :** `{ name, total, unseen, recent }`
 
+### create_draft
+
+Creer un brouillon et le sauvegarder dans le dossier Drafts. L'email n'est PAS envoye.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `to` | string[] | oui | Destinataires |
+| `cc` | string[] | non | Copie carbone |
+| `subject` | string | oui | Objet |
+| `body` | string | oui | Corps (texte brut) |
+
+### send_draft
+
+Envoyer un brouillon existant. Recupere le brouillon par UID, l'envoie via SMTP, le sauvegarde dans Sent Items, puis le supprime du dossier Drafts.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `uid` | entier | oui | UID du brouillon (dans le dossier Drafts) |
+
+### delete_draft
+
+Supprimer un brouillon du dossier Drafts (deplace vers Deleted Items).
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `uid` | entier | oui | UID du brouillon (dans le dossier Drafts) |
+
+### send_email
+
+Envoyer un email via SMTP. Une copie est sauvegardee dans Sent Items.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `to` | string[] | oui | Destinataires |
+| `cc` | string[] | non | Copie carbone |
+| `subject` | string | oui | Objet |
+| `body` | string | oui | Corps (texte brut) |
+
+### reply
+
+Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
+
+| Parametre | Type | Requis | Defaut | Description |
+|-----------|------|--------|--------|-------------|
+| `folder` | string | oui | — | Dossier de l'email original |
+| `uid` | entier | oui | — | UID de l'email |
+| `body` | string | oui | — | Corps de la reponse |
+| `reply_all` | bool | non | false | Repondre a tous |
+
+### forward
+
+Transferer un email a de nouveaux destinataires.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier de l'email original |
+| `uid` | entier | oui | UID de l'email |
+| `to` | string[] | oui | Nouveaux destinataires |
+| `cc` | string[] | non | Copie carbone |
+| `body` | string | non | Message additionnel |
+
 ## Architecture
 
 ```
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP + init crypto
 ├── config.rs           # Chargement configuration (fichier + env)
-├── server.rs           # Definition des 11 outils MCP
+├── server.rs           # Definition des 17 outils MCP
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
 ├── cache.rs            # Cache en memoire avec TTL (dossiers, listes, details, statuts)
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials

@@ -28,7 +28,7 @@ docker-compose.yml      # Stack complete avec volume persistant ./data
 src/
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
-├── server.rs           # ExchangeMcpServer + 15 outils MCP
+├── server.rs           # ExchangeMcpServer + 17 outils MCP
 ├── auth.rs             # Trait AuthProvider, BasicAuthProvider
 ├── cache.rs            # EmailCache — cache en memoire avec TTL par type de donnee
 ├── crypto.rs           # Chiffrement AES-256-GCM des credentials SQLite
@@ -40,7 +40,7 @@ src/
 │   └── store.rs        # Store SQLite (clients, auth codes, tokens, sessions, CSRF tokens)
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
-    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/send/delete)
     └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 

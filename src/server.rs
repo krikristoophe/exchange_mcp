@@ -148,6 +148,18 @@ pub struct CreateDraftParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendDraftParams {
+    /// UID of the draft to send (from the Drafts folder)
+    pub uid: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteDraftParams {
+    /// UID of the draft to delete (from the Drafts folder)
+    pub uid: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendEmailParams {
     /// Recipient email addresses
     pub to: Vec<String>,
@@ -342,11 +354,27 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Create a draft email and save it to the Drafts folder. The email is NOT sent.")]
+    #[tool(description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it.")]
     async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> String {
         match self.imap.create_draft(&params.to, &params.cc, &params.subject, &params.body).await {
             Ok(msg) => msg,
             Err(e) => format!("Error creating draft: {e}"),
+        }
+    }
+
+    #[tool(description = "Send a draft email from the Drafts folder. Fetches the draft by UID, sends it via SMTP, saves to Sent Items, and removes it from Drafts. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
+    async fn send_draft(&self, Parameters(params): Parameters<SendDraftParams>) -> String {
+        match self.imap.send_draft(params.uid).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Error sending draft: {e}"),
+        }
+    }
+
+    #[tool(description = "Delete a draft email from the Drafts folder (moves it to Deleted Items).")]
+    async fn delete_draft(&self, Parameters(params): Parameters<DeleteDraftParams>) -> String {
+        match self.imap.delete_draft(params.uid).await {
+            Ok(()) => "Draft deleted (moved to Deleted Items)".to_string(),
+            Err(e) => format!("Error deleting draft: {e}"),
         }
     }
 
@@ -386,7 +414,8 @@ impl ServerHandler for ExchangeMcpServer {
                  and search_emails to find specific messages. \
                  Reading emails does NOT mark them as read. \
                  Use include_preview=true on list/search to get text snippets without reading full emails. \
-                 Use create_draft to save a draft, send_email to send a new email, \
+                 Use create_draft to save a draft, send_draft to send it later, \
+                 delete_draft to discard it. Use send_email to send a new email, \
                  reply to respond to an email, and forward to forward an email.",
             )
     }

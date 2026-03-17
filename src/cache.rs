@@ -170,7 +170,13 @@ impl EmailCache {
     /// Invalidate all cached data for a folder (after move, delete, flag changes).
     pub fn invalidate_folder(&self, folder: &str) {
         if let Ok(mut guard) = self.summaries.write() {
-            guard.retain(|k, _| !k.starts_with(folder) && !k.contains(&format!(":{folder}:")));
+            guard.retain(|k, _| {
+                // List keys: "{folder}:{limit}"
+                // Search keys: "search:{folder}:{query}:{limit}"
+                let is_list_key = k.starts_with(&format!("{folder}:"));
+                let is_search_key = k.starts_with(&format!("search:{folder}:"));
+                !is_list_key && !is_search_key
+            });
         }
         if let Ok(mut guard) = self.details.write() {
             guard.retain(|(f, _), _| f != folder);

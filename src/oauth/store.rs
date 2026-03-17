@@ -268,4 +268,21 @@ impl OAuth2Store {
         )?;
         Ok(())
     }
+
+    /// Clear all tokens and auth codes.
+    ///
+    /// Called on server startup because sessions are in-memory only:
+    /// after a restart, all session tokens referenced by OAuth tokens are invalid.
+    /// Clients must re-authenticate through the OAuth flow.
+    pub fn clear_all_tokens(&self) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let deleted_tokens = conn.execute("DELETE FROM oauth_tokens", [])?;
+        let deleted_codes = conn.execute("DELETE FROM oauth_auth_codes", [])?;
+        if deleted_tokens > 0 || deleted_codes > 0 {
+            tracing::info!(
+                "Cleared {deleted_tokens} token(s) and {deleted_codes} auth code(s) from previous session"
+            );
+        }
+        Ok(())
+    }
 }

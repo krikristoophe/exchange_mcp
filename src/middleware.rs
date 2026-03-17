@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::oauth::store::OAuth2Store;
+use crate::session::SessionStore;
 use crate::CURRENT_USER_TOKEN;
 
 /// Extract Bearer token from an HTTP request's Authorization header.
@@ -30,11 +31,13 @@ pub async fn favicon() -> impl axum::response::IntoResponse {
 /// resolves OAuth2 access tokens to session tokens, and sets the
 /// CURRENT_USER_TOKEN task-local before delegating to the inner MCP service.
 ///
-/// Returns HTTP 401 with `WWW-Authenticate` header (RFC 9728) when no valid token.
+/// Returns HTTP 401 with `WWW-Authenticate` header (RFC 9728) when no valid token
+/// or when the referenced session no longer exists (e.g. after server restart).
 #[derive(Clone)]
 pub struct AuthMcpService<S> {
     pub inner: S,
     pub oauth2_store: Arc<OAuth2Store>,
+    pub sessions: Arc<SessionStore>,
     pub issuer: String,
 }
 
@@ -65,6 +68,7 @@ where
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
         let bearer_token = extract_bearer_token(&req);
         let oauth2_store = self.oauth2_store.clone();
+        let sessions = self.sessions.clone();
         let issuer = self.issuer.clone();
         let mut inner = self.inner.clone();
         std::mem::swap(&mut self.inner, &mut inner);
@@ -78,6 +82,9 @@ where
                     .flatten()
                     .map(|stored| stored.session_token)
             });
+
+            // Verify that the session still exists in memory
+            let session_token = session_token.filter(|st| sessions.contains(st));
 
             match session_token {
                 Some(st) => {

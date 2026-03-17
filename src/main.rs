@@ -54,7 +54,9 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     let oauth2_store = Arc::new(OAuth2Store::open(Some(OAuth2Store::db_path()))?);
     tracing::info!("OAuth2 store: {:?}", OAuth2Store::db_path());
 
-    let _ = oauth2_store.cleanup_expired();
+    // Sessions are in-memory only, so after a restart all session tokens are gone.
+    // Clear stale OAuth tokens that reference dead sessions to force re-authentication.
+    let _ = oauth2_store.clear_all_tokens();
 
     let oauth2_state = Arc::new(OAuth2State {
         store: oauth2_store.clone(),
@@ -97,6 +99,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     let auth_mcp = AuthMcpService {
         inner: mcp_service,
         oauth2_store,
+        sessions: session_store.clone(),
         issuer: issuer.clone(),
     };
 

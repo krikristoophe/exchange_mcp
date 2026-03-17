@@ -1162,6 +1162,172 @@ impl ImapClient {
         .await?
     }
 
+    // ---- Calendar operations ----
+
+    /// Default calendar folder name for Exchange
+    const DEFAULT_CALENDAR_FOLDER: &'static str = "Calendar";
+
+    /// List calendar events from the Calendar folder.
+    /// Optionally filter by date range using IMAP SEARCH (SINCE/BEFORE).
+    pub async fn list_calendar_events(
+        &self,
+        folder: Option<&str>,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<super::calendar::CalendarEvent>> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+        let limit_val = limit.unwrap_or(50);
+        let start_date = start_date.map(|s| s.to_string());
+        let end_date = end_date.map(|s| s.to_string());
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder)?;
+
+            // Build search query for date range
+            let search_query = build_calendar_search_query(start_date.as_deref(), end_date.as_deref());
+
+            let uids = session.uid_search(&search_query)?;
+
+            if uids.is_empty() {
+                session.logout()?;
+                return Ok(vec![]);
+            }
+
+            let mut uid_vec: Vec<u32> = uids.into_iter().collect();
+            uid_vec.sort_unstable();
+            uid_vec.reverse();
+            uid_vec.truncate(limit_val as usize);
+
+            let uid_range: String = uid_vec
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let messages = session.uid_fetch(&uid_range, "(UID BODY.PEEK[])")?;
+
+            let mut events: Vec<super::calendar::CalendarEvent> = Vec::new();
+            for msg in messages.iter() {
+                let uid = match msg.uid {
+                    Some(u) => u,
+                    None => continue,
+                };
+                if let Some(body) = msg.body() {
+                    if let Some(ics) = super::calendar::extract_ics_from_mime(body) {
+                        if let Some(event) = super::calendar::parse_calendar_event(uid, &ics) {
+                            events.push(event);
+                        }
+                    }
+                }
+            }
+
+            // Sort by start date
+            events.sort_by(|a, b| a.start.cmp(&b.start));
+
+            session.logout()?;
+            Ok(events)
+        })
+        .await?
+    }
+
+    /// Read full details of a single calendar event by UID.
+    pub async fn read_calendar_event(
+        &self,
+        folder: Option<&str>,
+        uid: u32,
+    ) -> Result<super::calendar::CalendarEventDetail> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder)?;
+
+            let messages = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
+            let msg = messages.iter().next().context("Calendar event not found")?;
+
+            let body = msg.body().context("No message body")?;
+            let ics = super::calendar::extract_ics_from_mime(body)
+                .context("No calendar data found in message")?;
+            let detail = super::calendar::parse_calendar_event_detail(uid, &ics)
+                .context("Failed to parse calendar event")?;
+
+            session.logout()?;
+            Ok(detail)
+        })
+        .await?
+    }
+
+    /// Search calendar events using IMAP SEARCH with a text query.
+    pub async fn search_calendar_events(
+        &self,
+        folder: Option<&str>,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<super::calendar::CalendarEvent>> {
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+        let limit_val = limit.unwrap_or(20);
+        let query = query.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder)?;
+
+            // Use TEXT search to match against the full message content (includes ICS data)
+            let search_query = format!("TEXT \"{}\"", query.replace('"', "\\\""));
+            let uids = session.uid_search(&search_query)?;
+
+            if uids.is_empty() {
+                session.logout()?;
+                return Ok(vec![]);
+            }
+
+            let mut uid_vec: Vec<u32> = uids.into_iter().collect();
+            uid_vec.sort_unstable();
+            uid_vec.reverse();
+            uid_vec.truncate(limit_val as usize);
+
+            let uid_range: String = uid_vec
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let messages = session.uid_fetch(&uid_range, "(UID BODY.PEEK[])")?;
+
+            let mut events: Vec<super::calendar::CalendarEvent> = Vec::new();
+            for msg in messages.iter() {
+                let uid = match msg.uid {
+                    Some(u) => u,
+                    None => continue,
+                };
+                if let Some(body) = msg.body() {
+                    if let Some(ics) = super::calendar::extract_ics_from_mime(body) {
+                        if let Some(event) = super::calendar::parse_calendar_event(uid, &ics) {
+                            events.push(event);
+                        }
+                    }
+                }
+            }
+
+            events.sort_by(|a, b| a.start.cmp(&b.start));
+
+            session.logout()?;
+            Ok(events)
+        })
+        .await?
+    }
+
     /// Get the Message-ID header of an email by UID.
     async fn get_message_id(&self, folder: &str, uid: u32) -> Result<String> {
         let credentials = self.auth.get_credentials().await?;
@@ -1210,4 +1376,48 @@ fn parse_address_list(addrs: &str) -> Vec<String> {
         .map(|a| extract_email_address(a.trim()))
         .filter(|a| !a.is_empty())
         .collect()
+}
+
+/// Build an IMAP SEARCH query for calendar events with optional date range.
+/// Dates should be in "dd-Mon-yyyy" format (e.g., "01-Jan-2024") or "yyyy-mm-dd" format.
+fn build_calendar_search_query(start_date: Option<&str>, end_date: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    parts.push("ALL".to_string());
+
+    if let Some(start) = start_date {
+        let formatted = normalize_imap_date(start);
+        parts.push(format!("SINCE {formatted}"));
+    }
+    if let Some(end) = end_date {
+        let formatted = normalize_imap_date(end);
+        parts.push(format!("BEFORE {formatted}"));
+    }
+
+    parts.join(" ")
+}
+
+/// Normalize a date string to IMAP format "dd-Mon-yyyy".
+/// Accepts "yyyy-mm-dd" or "dd-Mon-yyyy" formats.
+fn normalize_imap_date(date: &str) -> String {
+    // If already in IMAP format (contains month name), return as-is
+    if date.len() == 11 && date.chars().nth(2) == Some('-') && date.chars().nth(6) == Some('-') {
+        return date.to_string();
+    }
+
+    // Try to parse yyyy-mm-dd
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() == 3 && parts[0].len() == 4 {
+        let month_names = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        if let Ok(month_num) = parts[1].parse::<usize>() {
+            if month_num >= 1 && month_num <= 12 {
+                return format!("{}-{}-{}", parts[2], month_names[month_num - 1], parts[0]);
+            }
+        }
+    }
+
+    // Return as-is if we can't parse it
+    date.to_string()
 }

@@ -1,4 +1,5 @@
 mod parse;
+pub mod calendar;
 pub mod client;
 
 pub use client::ImapClient;

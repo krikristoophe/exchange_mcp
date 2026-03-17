@@ -245,7 +245,14 @@ fn format_ics_datetime(value: &str, name_part: &str) -> (String, bool) {
     if value.len() >= 15 {
         let date = &value[..8];
         let time = &value[9..15];
-        let tz_suffix = if value.ends_with('Z') { " UTC" } else { "" };
+        let tz_suffix = if value.ends_with('Z') {
+            " UTC".to_string()
+        } else {
+            // Extract TZID parameter if present (e.g., DTSTART;TZID=Europe/Paris)
+            extract_param(name_part, "TZID")
+                .map(|tz| format!(" ({tz})"))
+                .unwrap_or_default()
+        };
         let formatted = format!(
             "{}-{}-{} {}:{}:{}{}",
             &date[..4],
@@ -545,5 +552,21 @@ END:VCALENDAR"#;
             unescape_ics_text("Line 1\\nLine 2\\, with comma"),
             "Line 1\nLine 2, with comma"
         );
+    }
+
+    #[test]
+    fn test_parse_event_with_tzid() {
+        let ics = r#"BEGIN:VCALENDAR
+BEGIN:VEVENT
+SUMMARY:Paris Meeting
+DTSTART;TZID=Europe/Paris:20240115T090000
+DTEND;TZID=Europe/Paris:20240115T100000
+END:VEVENT
+END:VCALENDAR"#;
+
+        let event = parse_calendar_event(10, ics).unwrap();
+        assert_eq!(event.start, "2024-01-15 09:00:00 (Europe/Paris)");
+        assert_eq!(event.end.as_deref(), Some("2024-01-15 10:00:00 (Europe/Paris)"));
+        assert!(!event.all_day);
     }
 }

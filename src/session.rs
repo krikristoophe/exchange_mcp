@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::imap_client::ImapClient;
+use crate::imap::ImapClient;
 
 /// Represents an authenticated user session.
 #[allow(dead_code)]

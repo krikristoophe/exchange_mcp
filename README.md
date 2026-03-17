@@ -232,15 +232,20 @@ Rechercher des emails avec la syntaxe IMAP.
 
 ```
 src/
-├── main.rs             # Point d'entree, AuthMcpService (middleware Tower)
+├── main.rs             # Point d'entree, demarrage serveur HTTP
 ├── config.rs           # Chargement configuration (fichier + env)
 ├── server.rs           # Definition des outils MCP
 ├── auth.rs             # Trait AuthProvider + BasicAuthProvider
-├── oauth2_server.rs    # Serveur d'autorisation OAuth 2.1
-├── oauth2_store.rs     # Store SQLite pour OAuth 2.1
-├── imap_client.rs      # Operations IMAP et parsing email
+├── middleware.rs        # AuthMcpService (middleware Tower) + extraction Bearer token
 ├── session.rs          # Store de sessions multi-utilisateur
-└── login.rs            # Extraction Bearer token + favicon
+├── oauth/
+│   ├── mod.rs          # OAuth2State + re-exports
+│   ├── endpoints.rs    # Handlers HTTP (metadata, register, authorize, token)
+│   └── store.rs        # Store SQLite (clients, auth codes, tokens)
+└── imap/
+    ├── mod.rs          # Re-exports (ImapClient, html_to_text)
+    ├── client.rs       # Operations IMAP (connexion, lecture, recherche, flags)
+    └── parse.rs        # Parsing email (MIME, RFC 2047, HTML-to-text)
 ```
 
 ## Licence

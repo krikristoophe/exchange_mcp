@@ -146,13 +146,6 @@ impl ImapClient {
     ) -> Result<Vec<EmailSummary>> {
         let limit_val = limit.unwrap_or(20);
 
-        // Check cache (only for non-preview requests to avoid stale snippets)
-        if !include_preview {
-            if let Some(cached) = self.cache.get_summaries(folder, limit_val) {
-                return Ok(cached);
-            }
-        }
-
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
@@ -161,12 +154,26 @@ impl ImapClient {
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
-            let mailbox = session.select(&folder)?;
 
+            // Resync: check folder status via STATUS before using cache
+            let status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let exists = status.exists;
+            let uidnext = status.uid_next;
+
+            // If folder unchanged and cache available, return cached data
+            if !include_preview && cache.check_fingerprint(&folder, exists, uidnext) {
+                if let Some(cached) = cache.get_summaries(&folder, limit_val) {
+                    session.logout()?;
+                    return Ok(cached);
+                }
+            }
+
+            let mailbox = session.select(&folder)?;
             let total = mailbox.exists;
 
             if total == 0 {
                 session.logout()?;
+                cache.set_fingerprint(&folder, exists, uidnext);
                 return Ok(vec![]);
             }
 
@@ -193,6 +200,7 @@ impl ImapClient {
                 .collect();
 
             session.logout()?;
+            cache.set_fingerprint(&folder, exists, uidnext);
             cache.set_summaries(&folder, limit_val, summaries.clone());
             Ok(summaries)
         })
@@ -323,13 +331,6 @@ impl ImapClient {
     ) -> Result<Vec<EmailSummary>> {
         let limit_val = limit.unwrap_or(20);
 
-        // Check cache
-        if !include_preview {
-            if let Some(cached) = self.cache.get_search(folder, query, limit_val) {
-                return Ok(cached);
-            }
-        }
-
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
@@ -339,12 +340,27 @@ impl ImapClient {
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
+
+            // Resync: check folder status via STATUS before using cache
+            let status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let exists = status.exists;
+            let uidnext = status.uid_next;
+
+            // If folder unchanged and cache available, return cached data
+            if !include_preview && cache.check_fingerprint(&folder, exists, uidnext) {
+                if let Some(cached) = cache.get_search(&folder, &query, limit_val) {
+                    session.logout()?;
+                    return Ok(cached);
+                }
+            }
+
             session.select(&folder)?;
 
             let uids = session.uid_search(&query)?;
 
             if uids.is_empty() {
                 session.logout()?;
+                cache.set_fingerprint(&folder, exists, uidnext);
                 return Ok(vec![]);
             }
 
@@ -379,6 +395,7 @@ impl ImapClient {
                 .collect();
 
             session.logout()?;
+            cache.set_fingerprint(&folder, exists, uidnext);
             cache.set_search(&folder, &query, limit_val, summaries.clone());
             Ok(summaries)
         })
@@ -387,11 +404,6 @@ impl ImapClient {
 
     /// Get folder status (total, unseen, recent)
     pub async fn get_folder_status(&self, folder: &str) -> Result<FolderStatus> {
-        // Check cache
-        if let Some(cached) = self.cache.get_status(folder) {
-            return Ok(cached);
-        }
-
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
@@ -400,6 +412,19 @@ impl ImapClient {
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
+
+            // Resync: check folder status via STATUS before using cache
+            let quick_status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let exists = quick_status.exists;
+            let uidnext = quick_status.uid_next;
+
+            if cache.check_fingerprint(&folder, exists, uidnext) {
+                if let Some(cached) = cache.get_status(&folder) {
+                    session.logout()?;
+                    return Ok(cached);
+                }
+            }
+
             let mailbox = session.examine(&folder)?;
 
             let unseen = session
@@ -415,6 +440,7 @@ impl ImapClient {
             };
 
             session.logout()?;
+            cache.set_fingerprint(&status.name, exists, uidnext);
             cache.set_status(&status.name, status.clone());
             Ok(status)
         })
@@ -931,6 +957,7 @@ impl ImapClient {
         uid: u32,
         body: &str,
         reply_all: bool,
+        additional_cc: &[String],
     ) -> Result<String> {
         // Read original email for subject, from, message-id, etc.
         let original = self.read_email(folder, uid).await?;
@@ -960,6 +987,16 @@ impl ImapClient {
                 if addr.to_lowercase() != from.to_lowercase() {
                     cc_addrs.push(addr);
                 }
+            }
+        }
+        // Add extra CC recipients (minus ourselves and duplicates)
+        for addr in additional_cc {
+            let addr_lower = addr.to_lowercase();
+            if addr_lower != from.to_lowercase()
+                && !cc_addrs.iter().any(|a| a.to_lowercase() == addr_lower)
+                && !to_addrs.iter().any(|a| a.to_lowercase() == addr_lower)
+            {
+                cc_addrs.push(addr.clone());
             }
         }
 
@@ -994,6 +1031,7 @@ impl ImapClient {
         let imap_host = self.host.clone();
         let imap_port = self.port;
         let cache = self.cache.clone();
+        let source_folder = folder.to_string();
 
         tokio::task::spawn_blocking(move || {
             Self::send_smtp_and_save(
@@ -1014,6 +1052,7 @@ impl ImapClient {
             };
 
             cache.invalidate_folder("Sent Items");
+            cache.invalidate_folder(&source_folder);
             Ok(serde_json::json!({
                 "message": format!("Reply sent to {}", to_addrs.join(", ")),
                 "uid": sent_uid,
@@ -1073,6 +1112,7 @@ impl ImapClient {
         let imap_port = self.port;
         let cache = self.cache.clone();
         let to_display: Vec<String> = to.to_vec();
+        let source_folder = folder.to_string();
 
         tokio::task::spawn_blocking(move || {
             Self::send_smtp_and_save(
@@ -1093,6 +1133,7 @@ impl ImapClient {
             };
 
             cache.invalidate_folder("Sent Items");
+            cache.invalidate_folder(&source_folder);
             Ok(serde_json::json!({
                 "message": format!("Email forwarded to {}", to_display.join(", ")),
                 "uid": sent_uid,

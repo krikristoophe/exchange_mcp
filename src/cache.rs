@@ -34,6 +34,8 @@ pub struct EmailCache {
     details: RwLock<HashMap<(String, u32), CacheEntry<EmailDetail>>>,
     /// Folder status per folder
     status: RwLock<HashMap<String, CacheEntry<FolderStatus>>>,
+    /// Folder fingerprint: (exists, uidnext) — used to detect changes via STATUS
+    fingerprints: RwLock<HashMap<String, (u32, Option<u32>)>>,
 
     ttl_folders: Duration,
     ttl_summaries: Duration,
@@ -48,6 +50,7 @@ impl EmailCache {
             summaries: RwLock::new(HashMap::new()),
             details: RwLock::new(HashMap::new()),
             status: RwLock::new(HashMap::new()),
+            fingerprints: RwLock::new(HashMap::new()),
             ttl_folders: Duration::from_secs(300),    // 5 minutes
             ttl_summaries: Duration::from_secs(120),   // 2 minutes
             ttl_details: Duration::from_secs(600),     // 10 minutes
@@ -165,17 +168,51 @@ impl EmailCache {
         }
     }
 
+    // -- Folder fingerprints (for STATUS-based resync) --
+
+    /// Check if the folder has changed since last cache. Returns true if cache is still valid.
+    /// If the fingerprint differs, invalidates summaries and status for the folder.
+    pub fn check_fingerprint(&self, folder: &str, exists: u32, uidnext: Option<u32>) -> bool {
+        let current = (exists, uidnext);
+        if let Ok(guard) = self.fingerprints.read() {
+            if let Some(stored) = guard.get(folder) {
+                if *stored == current {
+                    return true; // folder unchanged, cache is valid
+                }
+            }
+        }
+        // Fingerprint changed or missing — invalidate summaries + status for this folder
+        self.invalidate_folder(folder);
+        false
+    }
+
+    /// Store the current folder fingerprint after a successful fetch.
+    pub fn set_fingerprint(&self, folder: &str, exists: u32, uidnext: Option<u32>) {
+        if let Ok(mut guard) = self.fingerprints.write() {
+            guard.insert(folder.to_string(), (exists, uidnext));
+        }
+    }
+
     // -- Invalidation --
 
     /// Invalidate all cached data for a folder (after move, delete, flag changes).
     pub fn invalidate_folder(&self, folder: &str) {
         if let Ok(mut guard) = self.summaries.write() {
-            guard.retain(|k, _| !k.starts_with(folder) && !k.contains(&format!(":{folder}:")));
+            guard.retain(|k, _| {
+                // List keys: "{folder}:{limit}"
+                // Search keys: "search:{folder}:{query}:{limit}"
+                let is_list_key = k.starts_with(&format!("{folder}:"));
+                let is_search_key = k.starts_with(&format!("search:{folder}:"));
+                !is_list_key && !is_search_key
+            });
         }
         if let Ok(mut guard) = self.details.write() {
             guard.retain(|(f, _), _| f != folder);
         }
         if let Ok(mut guard) = self.status.write() {
+            guard.remove(folder);
+        }
+        if let Ok(mut guard) = self.fingerprints.write() {
             guard.remove(folder);
         }
     }

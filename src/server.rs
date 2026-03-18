@@ -275,6 +275,9 @@ pub struct ReplyParams {
     /// Additional CC recipients to add to the reply
     #[serde(default)]
     pub additional_cc: Vec<String>,
+    /// Language for the reply header (e.g. "fr" for "a ecrit", "en" for "wrote"). Default: "en"
+    #[serde(default)]
+    pub lang: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -629,12 +632,13 @@ impl ExchangeMcpServer {
     }
 
     #[tool(
-        description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients. Use additional_cc to add extra CC recipients.",
+        description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients. Use additional_cc to add extra CC recipients. Use lang to set the language of the reply header (e.g. 'fr' for French, 'de' for German, default: 'en').",
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> Result<CallToolResult, ErrorData> {
         let reply_all = params.reply_all.unwrap_or(false);
-        match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all, &params.additional_cc).await {
+        let lang = params.lang.as_deref().unwrap_or("en");
+        match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all, &params.additional_cc, lang).await {
             Ok(msg) => {
                 let structured = json!({
                     "reply_body": params.body,

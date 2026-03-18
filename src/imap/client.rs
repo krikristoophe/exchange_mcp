@@ -958,6 +958,7 @@ impl ImapClient {
         body: &str,
         reply_all: bool,
         additional_cc: &[String],
+        lang: &str,
     ) -> Result<String> {
         // Read original email for subject, from, message-id, etc.
         let original = self.read_email(folder, uid).await?;
@@ -1003,16 +1004,34 @@ impl ImapClient {
         // Get Message-ID from original for In-Reply-To
         let message_id = self.get_message_id(folder, uid).await.ok();
 
-        // Build quoted body
-        let quoted_original = original.body_text.lines()
+        // Build quoted body — fallback to HTML-to-text if body_text is empty
+        let original_text = if original.body_text.trim().is_empty() {
+            original.body_html.as_deref()
+                .map(super::html_to_text)
+                .unwrap_or_default()
+        } else {
+            original.body_text.clone()
+        };
+        let quoted_original = original_text.lines()
             .map(|l| format!("> {l}"))
             .collect::<Vec<_>>()
             .join("\n");
 
+        let wrote_label = match lang {
+            "fr" => "a ecrit",
+            "de" => "schrieb",
+            "es" => "escribio",
+            "it" => "ha scritto",
+            "pt" => "escreveu",
+            "nl" => "schreef",
+            _ => "wrote",
+        };
+
         let full_body = format!(
-            "{body}\n\nOn {date}, {from_addr} wrote:\n{quoted}",
+            "{body}\n\nOn {date}, {from_addr} {wrote}:\n{quoted}",
             date = original.date,
             from_addr = original.from,
+            wrote = wrote_label,
             quoted = quoted_original,
         );
 
@@ -1082,6 +1101,15 @@ impl ImapClient {
             format!("Fwd: {}", original.subject)
         };
 
+        // Fallback to HTML-to-text if body_text is empty
+        let original_text = if original.body_text.trim().is_empty() {
+            original.body_html.as_deref()
+                .map(super::html_to_text)
+                .unwrap_or_default()
+        } else {
+            original.body_text.clone()
+        };
+
         let forwarded_body = format!(
             "{body}\n\n---------- Forwarded message ----------\n\
              From: {from_addr}\n\
@@ -1093,7 +1121,7 @@ impl ImapClient {
             date = original.date,
             subj = original.subject,
             to_addr = original.to,
-            orig_body = original.body_text,
+            orig_body = original_text,
         );
 
         let rfc822 = Self::build_message(

@@ -598,16 +598,19 @@ impl ImapClient {
     }
 
     /// Build an RFC 822 message from components.
+    /// If `body_html` is provided, builds a multipart/alternative message with both
+    /// plain text and HTML parts. Otherwise, builds a plain text message.
     fn build_message(
         from: &str,
         to: &[String],
         cc: &[String],
         subject: &str,
         body: &str,
+        body_html: Option<&str>,
         in_reply_to: Option<&str>,
         references: Option<&str>,
     ) -> Result<String> {
-        use lettre::message::{header, Mailbox, MessageBuilder};
+        use lettre::message::{header, Mailbox, MessageBuilder, MultiPart, SinglePart};
 
         let from_mailbox: Mailbox = from.parse().context("Invalid From address")?;
         let mut builder = MessageBuilder::new()
@@ -632,13 +635,54 @@ impl ImapClient {
             }
         }
 
-        let message = builder
-            .header(header::ContentType::TEXT_PLAIN)
-            .body(body.to_string())
-            .context("Failed to build email message")?;
+        let message = if let Some(html) = body_html {
+            builder
+                .multipart(
+                    MultiPart::alternative()
+                        .singlepart(
+                            SinglePart::builder()
+                                .header(header::ContentType::TEXT_PLAIN)
+                                .body(body.to_string()),
+                        )
+                        .singlepart(
+                            SinglePart::builder()
+                                .header(header::ContentType::TEXT_HTML)
+                                .body(html.to_string()),
+                        ),
+                )
+                .context("Failed to build multipart email message")?
+        } else {
+            builder
+                .header(header::ContentType::TEXT_PLAIN)
+                .body(body.to_string())
+                .context("Failed to build email message")?
+        };
 
         Ok(String::from_utf8(message.formatted())
             .context("Message contains invalid UTF-8")?)
+    }
+
+    /// Extract HTML body from a parsed email (handles multipart/alternative).
+    fn extract_html_body(parsed: &mailparse::ParsedMail) -> Option<String> {
+        if parsed.subparts.is_empty() {
+            // Single part — check if it's HTML
+            let content_type = &parsed.ctype.mimetype;
+            if content_type == "text/html" {
+                return parsed.get_body().ok();
+            }
+            return None;
+        }
+        // Multipart — search subparts for text/html
+        for part in &parsed.subparts {
+            if part.ctype.mimetype == "text/html" {
+                return part.get_body().ok();
+            }
+            // Recurse into nested multipart
+            if let Some(html) = Self::extract_html_body(part) {
+                return Some(html);
+            }
+        }
+        None
     }
 
     /// Send an email via SMTP and save a copy to "Sent Items" via IMAP APPEND.
@@ -720,10 +764,11 @@ impl ImapClient {
         cc: &[String],
         subject: &str,
         body: &str,
+        body_html: Option<&str>,
     ) -> Result<String> {
         let credentials = self.auth.get_credentials().await?;
         let from = credentials.username.clone();
-        let rfc822 = Self::build_message(&from, to, cc, subject, body, None, None)?;
+        let rfc822 = Self::build_message(&from, to, cc, subject, body, body_html, None, None)?;
 
         let host = self.host.clone();
         let port = self.port;
@@ -759,6 +804,7 @@ impl ImapClient {
         cc: Option<Vec<String>>,
         subject: Option<String>,
         body: Option<String>,
+        body_html: Option<String>,
     ) -> Result<String> {
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
@@ -810,14 +856,16 @@ impl ImapClient {
                 }
             }
 
-            // Extract current body text
+            // Extract current body text and HTML
             let current_body = parsed.get_body().unwrap_or_default();
+            let current_html = Self::extract_html_body(&parsed);
 
             // Merge: use provided values or fall back to current
             let final_to = to.unwrap_or(current_to);
             let final_cc = cc.unwrap_or(current_cc);
             let final_subject = subject.unwrap_or(current_subject);
             let final_body = body.unwrap_or(current_body);
+            let final_html = body_html.or(current_html);
 
             drop(messages);
 
@@ -827,7 +875,7 @@ impl ImapClient {
 
             // 3. Build and append new draft
             let from = credentials.username.clone();
-            let rfc822 = Self::build_message(&from, &final_to, &final_cc, &final_subject, &final_body, None, None)?;
+            let rfc822 = Self::build_message(&from, &final_to, &final_cc, &final_subject, &final_body, final_html.as_deref(), None, None)?;
 
             session
                 .append_with_flags("Drafts", rfc822.as_bytes(), &[imap::types::Flag::Draft])
@@ -910,10 +958,11 @@ impl ImapClient {
         cc: &[String],
         subject: &str,
         body: &str,
+        body_html: Option<&str>,
     ) -> Result<String> {
         let credentials = self.auth.get_credentials().await?;
         let from = credentials.username.clone();
-        let rfc822 = Self::build_message(&from, to, cc, subject, body, None, None)?;
+        let rfc822 = Self::build_message(&from, to, cc, subject, body, body_html, None, None)?;
 
         let smtp_host = self.smtp_host.clone();
         let smtp_port = self.smtp_port;
@@ -956,6 +1005,7 @@ impl ImapClient {
         folder: &str,
         uid: u32,
         body: &str,
+        body_html: Option<&str>,
         reply_all: bool,
         additional_cc: &[String],
         lang: &str,
@@ -1035,12 +1085,25 @@ impl ImapClient {
             quoted = quoted_original,
         );
 
+        // Build HTML reply body if HTML was provided
+        let full_body_html = body_html.map(|html| {
+            let original_html_content = original.body_html.as_deref().unwrap_or(&original_text);
+            format!(
+                "{html}<br><br><div>On {date}, {from_addr} {wrote}:</div><blockquote style=\"margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex\">{quoted}</blockquote>",
+                date = original.date,
+                from_addr = original.from,
+                wrote = wrote_label,
+                quoted = original_html_content,
+            )
+        });
+
         let rfc822 = Self::build_message(
             &from,
             &to_addrs,
             &cc_addrs,
             &subject,
             &full_body,
+            full_body_html.as_deref(),
             message_id.as_deref(),
             None,
         )?;
@@ -1089,6 +1152,7 @@ impl ImapClient {
         to: &[String],
         cc: &[String],
         body: &str,
+        body_html: Option<&str>,
     ) -> Result<String> {
         let original = self.read_email(folder, uid).await?;
 
@@ -1124,12 +1188,31 @@ impl ImapClient {
             orig_body = original_text,
         );
 
+        // Build HTML forward body if HTML was provided
+        let forwarded_body_html = body_html.map(|html| {
+            let original_html_content = original.body_html.as_deref().unwrap_or(&original_text);
+            format!(
+                "{html}<br><br><hr><b>---------- Forwarded message ----------</b><br>\
+                 <b>From:</b> {from_addr}<br>\
+                 <b>Date:</b> {date}<br>\
+                 <b>Subject:</b> {subj}<br>\
+                 <b>To:</b> {to_addr}<br><br>\
+                 {orig_body}",
+                from_addr = original.from,
+                date = original.date,
+                subj = original.subject,
+                to_addr = original.to,
+                orig_body = original_html_content,
+            )
+        });
+
         let rfc822 = Self::build_message(
             &from,
             to,
             cc,
             &subject,
             &forwarded_body,
+            forwarded_body_html.as_deref(),
             None,
             None,
         )?;

@@ -72,7 +72,7 @@ Client MCP
 - **Langue de l'UI** : francais (messages d'erreur utilisateur, formulaires HTML)
 - **Gestion d'erreur** : `anyhow::Result` partout, pas de `unwrap()` sur du code faillible
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
-- **SMTP** : envoi via `lettre` (STARTTLS) dans `spawn_blocking`, copie automatique dans "Sent Items" via IMAP APPEND
+- **SMTP** : envoi via `lettre` (STARTTLS) dans `spawn_blocking`, copie automatique dans "Sent Items" via IMAP APPEND. Supporte les emails HTML via `body_html` (multipart/alternative text + HTML)
 - **Tokens** : generes via `base64(random_bytes(32))` URL-safe sans padding (256 bits)
 - **Sessions** : token aleatoire 256 bits comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts. Timeout d'inactivite de 8h avec nettoyage periodique (toutes les 5 min)
 - **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite, zeroizes en memoire au drop (`ZeroizeOnDrop`). Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`

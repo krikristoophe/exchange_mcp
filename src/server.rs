@@ -216,6 +216,9 @@ pub struct CreateDraftParams {
     pub subject: String,
     /// Email body (plain text)
     pub body: String,
+    /// Email body in HTML format (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts. Use this for formatted emails and signatures.
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -234,6 +237,9 @@ pub struct UpdateDraftParams {
     /// New body in plain text (if omitted, keeps original body)
     #[serde(default)]
     pub body: Option<String>,
+    /// New body in HTML format (if omitted, keeps original HTML body). When provided, the email uses multipart/alternative with both plain text and HTML parts.
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -259,6 +265,9 @@ pub struct SendEmailParams {
     pub subject: String,
     /// Email body (plain text)
     pub body: String,
+    /// Email body in HTML format (optional). When provided, the email is sent as multipart/alternative with both plain text and HTML parts. Use this for formatted emails and signatures.
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -269,6 +278,9 @@ pub struct ReplyParams {
     pub uid: u32,
     /// Reply body (plain text)
     pub body: String,
+    /// Reply body in HTML format (optional). When provided, the reply is sent as multipart/alternative with both plain text and HTML parts. Use this for formatted replies and signatures.
+    #[serde(default)]
+    pub body_html: Option<String>,
     /// Reply to all recipients (default: false)
     #[serde(default)]
     pub reply_all: Option<bool>,
@@ -344,6 +356,9 @@ pub struct ForwardParams {
     /// Additional message to include before the forwarded content (optional)
     #[serde(default)]
     pub body: String,
+    /// Additional message in HTML format to include before the forwarded content (optional). When provided, the forward is sent as multipart/alternative with both plain text and HTML parts.
+    #[serde(default)]
+    pub body_html: Option<String>,
 }
 
 /// Post-process an email detail according to format and strip_quotes options.
@@ -560,17 +575,18 @@ impl ExchangeMcpServer {
     }
 
     #[tool(
-        description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it.",
+        description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it. Supports optional body_html for formatted emails with signatures.",
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> Result<CallToolResult, ErrorData> {
-        match self.imap.create_draft(&params.to, &params.cc, &params.subject, &params.body).await {
+        match self.imap.create_draft(&params.to, &params.cc, &params.subject, &params.body, params.body_html.as_deref()).await {
             Ok(msg) => {
                 let structured = json!({
                     "to": params.to.join(", "),
                     "cc": params.cc.join(", "),
                     "subject": params.subject,
                     "body_text": params.body,
+                    "body_html": params.body_html,
                     "status": "draft",
                 });
                 result_with_structured(msg, structured)
@@ -581,7 +597,7 @@ impl ExchangeMcpServer {
 
     #[tool(description = "Update an existing draft email in the Drafts folder. Fetches the current draft, replaces only the provided fields (to, cc, subject, body), and saves the updated version. The old draft is deleted. Returns the new UID. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
     async fn update_draft(&self, Parameters(params): Parameters<UpdateDraftParams>) -> String {
-        match self.imap.update_draft(params.uid, params.to, params.cc, params.subject, params.body).await {
+        match self.imap.update_draft(params.uid, params.to, params.cc, params.subject, params.body, params.body_html).await {
             Ok(msg) => msg,
             Err(e) => format!("Error updating draft: {e}"),
         }
@@ -612,17 +628,18 @@ impl ExchangeMcpServer {
     }
 
     #[tool(
-        description = "Send an email via SMTP. The sent message is saved to the Sent Items folder.",
+        description = "Send an email via SMTP. The sent message is saved to the Sent Items folder. Supports optional body_html for formatted emails with signatures.",
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn send_email(&self, Parameters(params): Parameters<SendEmailParams>) -> Result<CallToolResult, ErrorData> {
-        match self.imap.send_email(&params.to, &params.cc, &params.subject, &params.body).await {
+        match self.imap.send_email(&params.to, &params.cc, &params.subject, &params.body, params.body_html.as_deref()).await {
             Ok(msg) => {
                 let structured = json!({
                     "to": params.to.join(", "),
                     "cc": params.cc.join(", "),
                     "subject": params.subject,
                     "body_text": params.body,
+                    "body_html": params.body_html,
                     "status": "sent",
                 });
                 result_with_structured(msg, structured)
@@ -638,7 +655,7 @@ impl ExchangeMcpServer {
     async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> Result<CallToolResult, ErrorData> {
         let reply_all = params.reply_all.unwrap_or(false);
         let lang = params.lang.as_deref().unwrap_or("en");
-        match self.imap.reply_email(&params.folder, params.uid, &params.body, reply_all, &params.additional_cc, lang).await {
+        match self.imap.reply_email(&params.folder, params.uid, &params.body, params.body_html.as_deref(), reply_all, &params.additional_cc, lang).await {
             Ok(msg) => {
                 let structured = json!({
                     "reply_body": params.body,
@@ -666,7 +683,7 @@ impl ExchangeMcpServer {
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> Result<CallToolResult, ErrorData> {
-        match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body).await {
+        match self.imap.forward_email(&params.folder, params.uid, &params.to, &params.cc, &params.body, params.body_html.as_deref()).await {
             Ok(msg) => {
                 let structured = json!({
                     "to": params.to.join(", "),

@@ -314,6 +314,7 @@ Creer un brouillon et le sauvegarder dans le dossier Drafts. L'email n'est PAS e
 | `cc` | string[] | non | Copie carbone |
 | `subject` | string | oui | Objet |
 | `body` | string | oui | Corps (texte brut) |
+| `body_html` | string | non | Corps en HTML (multipart/alternative). Pour les emails formates et signatures. |
 
 **Retour :** `{ message, uid, folder }`
 
@@ -328,6 +329,7 @@ Modifier un brouillon existant. Seuls les champs fournis sont mis a jour, les au
 | `cc` | string[] | non | Nouvelle copie carbone (si omis, conserve les actuels) |
 | `subject` | string | non | Nouvel objet (si omis, conserve l'actuel) |
 | `body` | string | non | Nouveau corps (si omis, conserve l'actuel) |
+| `body_html` | string | non | Nouveau corps en HTML (si omis, conserve l'actuel) |
 
 **Retour :** `{ message, uid, folder }` (le UID change car IMAP ne permet pas l'edition en place)
 
@@ -357,6 +359,7 @@ Envoyer un email via SMTP. Une copie est sauvegardee dans Sent Items.
 | `cc` | string[] | non | Copie carbone |
 | `subject` | string | oui | Objet |
 | `body` | string | oui | Corps (texte brut) |
+| `body_html` | string | non | Corps en HTML (multipart/alternative). Pour les emails formates et signatures. |
 
 ### reply_email
 
@@ -367,6 +370,7 @@ Repondre a un email. Lit l'original, le cite, et envoie la reponse via SMTP.
 | `folder` | string | oui | — | Dossier de l'email original |
 | `uid` | entier | oui | — | UID de l'email |
 | `body` | string | oui | — | Corps de la reponse |
+| `body_html` | string | non | — | Corps de la reponse en HTML (multipart/alternative) |
 | `reply_all` | bool | non | false | Repondre a tous |
 
 ### forward_email
@@ -380,6 +384,7 @@ Transferer un email a de nouveaux destinataires.
 | `to` | string[] | oui | Nouveaux destinataires |
 | `cc` | string[] | non | Copie carbone |
 | `body` | string | non | Message additionnel |
+| `body_html` | string | non | Message additionnel en HTML (multipart/alternative) |
 
 ### list_contacts
 

@@ -66,7 +66,7 @@
   </div>
 
   <script type="module">
-    import { App } from 'https://esm.sh/@modelcontextprotocol/ext-apps@0.4.1';
+    import { App } from 'https://esm.sh/@modelcontextprotocol/ext-apps@1.2.2';
 
     const app = new App({ name: 'inbox-list', version: '1.0.0' });
     const listEl = document.getElementById('list');
@@ -130,7 +130,10 @@
     }
 
     app.ontoolinput = function(params) {
-      if (params.input) renderEmails(params.input);
+      if (params.arguments) {
+        var folder = params.arguments.folder || '';
+        if (folder) document.getElementById('folder-info').textContent = folder + ' — chargement...';
+      }
     };
 
     app.ontoolresult = function(result) {

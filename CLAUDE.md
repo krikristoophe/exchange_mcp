@@ -74,7 +74,7 @@ Client MCP
 - **IMAP** : toutes les operations IMAP passent par `tokio::task::spawn_blocking`
 - **SMTP** : envoi via `lettre` (STARTTLS) dans `spawn_blocking`, copie automatique dans "Sent Items" via IMAP APPEND. Supporte les emails HTML via `body_html` (multipart/alternative text + HTML)
 - **Tokens** : generes via `base64(random_bytes(32))` URL-safe sans padding (256 bits)
-- **Sessions** : token aleatoire 256 bits comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts. Timeout d'inactivite de 8h avec nettoyage periodique (toutes les 5 min)
+- **Sessions** : token aleatoire 256 bits comme cle, stockees dans un `RwLock<HashMap>` + persistees en SQLite (table `sessions`) pour survivre aux restarts. Timeout d'inactivite de 7 jours avec nettoyage periodique (toutes les 5 min)
 - **Credentials** : mots de passe IMAP chiffres en AES-256-GCM avant stockage SQLite, zeroizes en memoire au drop (`ZeroizeOnDrop`). Cle dans `EXCHANGE_MCP_ENCRYPTION_KEY` ou generee automatiquement dans un fichier `.key`
 - **Auth** : uniquement login/password IMAP (pas d'OAuth2 Microsoft cote IMAP)
 - **Cache** : cache en memoire par utilisateur avec TTL (dossiers 5min, listes 2min, details 10min, statut 1min). Invalide automatiquement lors des operations d'ecriture
@@ -102,7 +102,7 @@ Client MCP
 - Le crate `imap` est synchrone — ne jamais l'appeler directement dans un contexte async
 - `CURRENT_USER_TOKEN` est un `task_local!` — doit etre scope dans la future avant d'appeler le service MCP
 - `SessionStore::sessions_blocking_read()` est utilise dans la factory MCP (contexte sync) — ne pas remplacer par la version async
-- Les auth codes OAuth expirent en 10 minutes, les access tokens en 1 heure, les sessions en 8h d'inactivite
+- Les auth codes OAuth expirent en 10 minutes, les access tokens en 24 heures, les sessions en 7 jours d'inactivite
 - Au demarrage, les sessions sont restaurees depuis SQLite et les tokens orphelins sont nettoyes
 - Une tache periodique (toutes les 5 min) nettoie les sessions expirees et les tokens/codes orphelins
 - `read_email` utilise `BODY.PEEK[]` pour ne pas marquer les emails comme lus

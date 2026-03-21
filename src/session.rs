@@ -3,8 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::imap::ImapClient;
 
-/// Session timeout: 8 hours of inactivity.
-const SESSION_TIMEOUT_SECS: i64 = 8 * 3600;
+/// Session timeout: 7 days of inactivity.
+const SESSION_TIMEOUT_SECS: i64 = 7 * 24 * 3600;
 
 /// Represents an authenticated user session.
 #[allow(dead_code)]

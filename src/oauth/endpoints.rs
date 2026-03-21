@@ -678,7 +678,7 @@ async fn handle_code_exchange(
     // Issue tokens
     let access_token = random_token(32);
     let refresh_token = random_token(32);
-    let expires_in: i64 = 3600; // 1 hour
+    let expires_in: i64 = 24 * 3600; // 24 hours
     let expires_at = chrono::Utc::now().timestamp() + expires_in;
 
     let stored = StoredToken {
@@ -751,12 +751,15 @@ async fn handle_refresh(state: Arc<OAuth2State>, req: TokenRequest) -> axum::res
             .into_response();
     }
 
+    // Touch the session so that token refresh keeps it alive
+    state.sessions.touch(&old_token.session_token);
+
     // Rotate tokens
     let _ = state.store.delete_token(&old_token.access_token);
 
     let new_access = random_token(32);
     let new_refresh = random_token(32);
-    let expires_in: i64 = 3600;
+    let expires_in: i64 = 24 * 3600; // 24 hours
     let expires_at = chrono::Utc::now().timestamp() + expires_in;
 
     let stored = StoredToken {

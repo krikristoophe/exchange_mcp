@@ -400,7 +400,10 @@ fn process_email_detail(
 
 #[tool_router]
 impl ExchangeMcpServer {
-    #[tool(description = "List all mailbox folders (INBOX, Sent Items, Drafts, etc.)")]
+    #[tool(
+        description = "List all mailbox folders (INBOX, Sent Items, Drafts, etc.)",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn list_folders(&self, Parameters(_params): Parameters<ListFoldersParams>) -> String {
         match self.imap.list_folders().await {
             Ok(folders) => serde_json::to_string_pretty(&folders).unwrap_or_else(|e| e.to_string()),
@@ -410,6 +413,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "List recent emails in a folder. Returns subject, from, date, flags, size for each email. Use include_preview=true to also get a short text snippet (first ~200 chars) without reading the full email.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         meta = ui_meta(INBOX_LIST_URI)
     )]
     async fn list_emails(&self, Parameters(params): Parameters<ListEmailsParams>) -> Result<CallToolResult, ErrorData> {
@@ -429,6 +433,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Read the full content of a single email. By default returns text only (no HTML) with quoted replies stripped to minimize token usage. Use format=\"both\" to include HTML, and strip_quotes=false to keep full thread. Does NOT mark the email as read.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn read_email(&self, Parameters(params): Parameters<ReadEmailParams>) -> Result<CallToolResult, ErrorData> {
@@ -454,7 +459,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Read multiple emails at once by their UIDs (batch). More efficient than calling read_email multiple times. Same format and strip_quotes options apply. Does NOT mark emails as read.")]
+    #[tool(
+        description = "Read multiple emails at once by their UIDs (batch). More efficient than calling read_email multiple times. Same format and strip_quotes options apply. Does NOT mark emails as read.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn read_emails(&self, Parameters(params): Parameters<ReadEmailsParams>) -> String {
         match self.imap.read_emails(&params.folder, &params.uids).await {
             Ok(emails) => {
@@ -471,6 +479,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Search emails in a folder using IMAP search criteria. Examples: UNSEEN, FROM \"user@example.com\", SUBJECT \"meeting\", SINCE 01-Jan-2024. Use include_preview=true for text snippets.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
         meta = ui_meta(INBOX_LIST_URI)
     )]
     async fn search_emails(&self, Parameters(params): Parameters<SearchEmailsParams>) -> Result<CallToolResult, ErrorData> {
@@ -493,7 +502,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Mark an email as read (add \\Seen flag)")]
+    #[tool(
+        description = "Mark an email as read (add \\Seen flag)",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn mark_as_read(&self, Parameters(params): Parameters<MarkReadParams>) -> String {
         match self.imap.mark_as_read(&params.folder, params.uid).await {
             Ok(()) => "Email marked as read".to_string(),
@@ -501,7 +513,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Mark an email as unread (remove \\Seen flag)")]
+    #[tool(
+        description = "Mark an email as unread (remove \\Seen flag)",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn mark_as_unread(&self, Parameters(params): Parameters<MarkReadParams>) -> String {
         match self.imap.mark_as_unread(&params.folder, params.uid).await {
             Ok(()) => "Email marked as unread".to_string(),
@@ -509,7 +524,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Move an email from one folder to another")]
+    #[tool(
+        description = "Move an email from one folder to another",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn move_email(&self, Parameters(params): Parameters<MoveEmailParams>) -> String {
         match self
             .imap
@@ -521,7 +539,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Delete an email (moves it to the Deleted Items folder)")]
+    #[tool(
+        description = "Delete an email (moves it to the Deleted Items folder)",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn delete_email(&self, Parameters(params): Parameters<DeleteEmailParams>) -> String {
         match self.imap.delete_email(&params.folder, params.uid).await {
             Ok(()) => "Email deleted (moved to Deleted Items)".to_string(),
@@ -529,7 +550,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Set or remove an IMAP flag on an email. Common flags: \\Flagged, \\Seen, \\Answered, \\Draft")]
+    #[tool(
+        description = "Set or remove an IMAP flag on an email. Common flags: \\Flagged, \\Seen, \\Answered, \\Draft",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn set_flag(&self, Parameters(params): Parameters<SetFlagParams>) -> String {
         let action = if params.add { "added" } else { "removed" };
         match self
@@ -542,7 +566,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Get folder status: total messages, unseen count, and recent count")]
+    #[tool(
+        description = "Get folder status: total messages, unseen count, and recent count",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn folder_status(&self, Parameters(params): Parameters<FolderStatusParams>) -> String {
         match self.imap.get_folder_status(&params.folder).await {
             Ok(status) => serde_json::to_string_pretty(&status).unwrap_or_else(|e| e.to_string()),
@@ -550,7 +577,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Create a new mailbox folder. Use a path separator (usually '/') to create subfolders (e.g., 'INBOX/Projects').")]
+    #[tool(
+        description = "Create a new mailbox folder. Use a path separator (usually '/') to create subfolders (e.g., 'INBOX/Projects').",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn create_folder(&self, Parameters(params): Parameters<CreateFolderParams>) -> String {
         match self.imap.create_folder(&params.folder).await {
             Ok(()) => format!("Folder '{}' created", params.folder),
@@ -558,7 +588,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Rename a mailbox folder. Can also be used to move a folder by changing its path.")]
+    #[tool(
+        description = "Rename a mailbox folder. Can also be used to move a folder by changing its path.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+    )]
     async fn rename_folder(&self, Parameters(params): Parameters<RenameFolderParams>) -> String {
         match self.imap.rename_folder(&params.folder, &params.new_name).await {
             Ok(()) => format!("Folder '{}' renamed to '{}'", params.folder, params.new_name),
@@ -566,7 +599,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Delete a mailbox folder. The folder must be empty or the server must support recursive deletion. Use with caution.")]
+    #[tool(
+        description = "Delete a mailbox folder. The folder must be empty or the server must support recursive deletion. Use with caution.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn delete_folder(&self, Parameters(params): Parameters<DeleteFolderParams>) -> String {
         match self.imap.delete_folder(&params.folder).await {
             Ok(()) => format!("Folder '{}' deleted", params.folder),
@@ -576,6 +612,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Create a draft email and save it to the Drafts folder. The email is NOT sent. Use send_draft to send it later, or delete_draft to discard it. Supports optional body_html for formatted emails with signatures.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn create_draft(&self, Parameters(params): Parameters<CreateDraftParams>) -> Result<CallToolResult, ErrorData> {
@@ -595,7 +632,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Update an existing draft email in the Drafts folder. Fetches the current draft, replaces only the provided fields (to, cc, subject, body), and saves the updated version. The old draft is deleted. Returns the new UID. Use list_emails with folder=\"Drafts\" to find the draft UID.")]
+    #[tool(
+        description = "Update an existing draft email in the Drafts folder. Fetches the current draft, replaces only the provided fields (to, cc, subject, body), and saves the updated version. The old draft is deleted. Returns the new UID. Use list_emails with folder=\"Drafts\" to find the draft UID.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn update_draft(&self, Parameters(params): Parameters<UpdateDraftParams>) -> String {
         match self.imap.update_draft(params.uid, params.to, params.cc, params.subject, params.body, params.body_html).await {
             Ok(msg) => msg,
@@ -605,6 +645,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Send a draft email from the Drafts folder. Fetches the draft by UID, sends it via SMTP, saves to Sent Items, and removes it from Drafts. Use list_emails with folder=\"Drafts\" to find the draft UID.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn send_draft(&self, Parameters(params): Parameters<SendDraftParams>) -> Result<CallToolResult, ErrorData> {
@@ -619,7 +660,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Delete a draft email from the Drafts folder (moves it to Deleted Items).")]
+    #[tool(
+        description = "Delete a draft email from the Drafts folder (moves it to Deleted Items).",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn delete_draft(&self, Parameters(params): Parameters<DeleteDraftParams>) -> String {
         match self.imap.delete_draft(params.uid).await {
             Ok(()) => "Draft deleted (moved to Deleted Items)".to_string(),
@@ -629,6 +673,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Send an email via SMTP. The sent message is saved to the Sent Items folder. Supports optional body_html for formatted emails with signatures.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn send_email(&self, Parameters(params): Parameters<SendEmailParams>) -> Result<CallToolResult, ErrorData> {
@@ -650,6 +695,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Reply to an email. Reads the original message, quotes it, and sends the reply via SMTP. Use reply_all=true to reply to all recipients. Use additional_cc to add extra CC recipients. Use lang to set the language of the reply header (e.g. 'fr' for French, 'de' for German, default: 'en').",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn reply_email(&self, Parameters(params): Parameters<ReplyParams>) -> Result<CallToolResult, ErrorData> {
@@ -667,7 +713,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "List contacts extracted from recent emails. Scans From, To, and Cc headers in the specified folders (default: INBOX + Sent Items) to build a contact list with name and email. Contacts are deduplicated by email and sorted by frequency (most contacted first).")]
+    #[tool(
+        description = "List contacts extracted from recent emails. Scans From, To, and Cc headers in the specified folders (default: INBOX + Sent Items) to build a contact list with name and email. Contacts are deduplicated by email and sorted by frequency (most contacted first).",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn list_contacts(&self, Parameters(params): Parameters<ListContactsParams>) -> String {
         let limit = params.limit.unwrap_or(50);
         let scan_limit = params.scan_limit.unwrap_or(100);
@@ -680,6 +729,7 @@ impl ExchangeMcpServer {
 
     #[tool(
         description = "Forward an email to new recipients. Reads the original message, includes it in the body, and sends via SMTP.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true),
         meta = ui_meta(EMAIL_PREVIEW_URI)
     )]
     async fn forward_email(&self, Parameters(params): Parameters<ForwardParams>) -> Result<CallToolResult, ErrorData> {
@@ -697,7 +747,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "List calendar events from the Exchange Calendar folder. Optionally filter by date range (start_date/end_date in yyyy-mm-dd format). Returns subject, start/end times, location, organizer, and recurrence info for each event.")]
+    #[tool(
+        description = "List calendar events from the Exchange Calendar folder. Optionally filter by date range (start_date/end_date in yyyy-mm-dd format). Returns subject, start/end times, location, organizer, and recurrence info for each event.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn list_calendar_events(&self, Parameters(params): Parameters<ListCalendarEventsParams>) -> String {
         match self
             .imap
@@ -714,7 +767,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Read the full details of a single calendar event by its UID. Returns subject, start/end times, location, organizer, attendees, description, recurrence rule, categories, and more.")]
+    #[tool(
+        description = "Read the full details of a single calendar event by its UID. Returns subject, start/end times, location, organizer, attendees, description, recurrence rule, categories, and more.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn read_calendar_event(&self, Parameters(params): Parameters<ReadCalendarEventParams>) -> String {
         match self
             .imap
@@ -726,7 +782,10 @@ impl ExchangeMcpServer {
         }
     }
 
-    #[tool(description = "Search calendar events by text query. Searches across event subject, description, location, and attendees. Returns matching events sorted by start date.")]
+    #[tool(
+        description = "Search calendar events by text query. Searches across event subject, description, location, and attendees. Returns matching events sorted by start date.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn search_calendar_events(&self, Parameters(params): Parameters<SearchCalendarEventsParams>) -> String {
         match self
             .imap

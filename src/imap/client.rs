@@ -155,10 +155,10 @@ impl ImapClient {
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
-            // Resync: check folder status via STATUS before using cache
-            let status = session.status(&folder, "(MESSAGES)")?;
-            let exists = status.exists;
-            let uidnext = status.uid_next;
+            let mailbox = session.select(&folder)?;
+            let total = mailbox.exists;
+            let exists = total;
+            let uidnext = mailbox.uid_next;
 
             // If folder unchanged and cache available, return cached data
             if !include_preview && cache.check_fingerprint(&folder, exists, uidnext) {
@@ -167,9 +167,6 @@ impl ImapClient {
                     return Ok(cached);
                 }
             }
-
-            let mailbox = session.select(&folder)?;
-            let total = mailbox.exists;
 
             if total == 0 {
                 session.logout()?;
@@ -341,10 +338,9 @@ impl ImapClient {
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
-            // Resync: check folder status via STATUS before using cache
-            let status = session.status(&folder, "(MESSAGES)")?;
-            let exists = status.exists;
-            let uidnext = status.uid_next;
+            let mailbox = session.select(&folder)?;
+            let exists = mailbox.exists;
+            let uidnext = mailbox.uid_next;
 
             // If folder unchanged and cache available, return cached data
             if !include_preview && cache.check_fingerprint(&folder, exists, uidnext) {
@@ -353,8 +349,6 @@ impl ImapClient {
                     return Ok(cached);
                 }
             }
-
-            session.select(&folder)?;
 
             let uids = session.uid_search(&query)?;
 
@@ -413,10 +407,9 @@ impl ImapClient {
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
-            // Resync: check folder status via STATUS before using cache
-            let quick_status = session.status(&folder, "(MESSAGES)")?;
-            let exists = quick_status.exists;
-            let uidnext = quick_status.uid_next;
+            let mailbox = session.examine(&folder)?;
+            let exists = mailbox.exists;
+            let uidnext = mailbox.uid_next;
 
             if cache.check_fingerprint(&folder, exists, uidnext) {
                 if let Some(cached) = cache.get_status(&folder) {
@@ -424,8 +417,6 @@ impl ImapClient {
                     return Ok(cached);
                 }
             }
-
-            let mailbox = session.examine(&folder)?;
 
             let unseen = session
                 .uid_search("UNSEEN")

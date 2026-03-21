@@ -156,7 +156,7 @@ impl ImapClient {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
             // Resync: check folder status via STATUS before using cache
-            let status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let status = session.status(&folder, "(MESSAGES)")?;
             let exists = status.exists;
             let uidnext = status.uid_next;
 
@@ -342,7 +342,7 @@ impl ImapClient {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
             // Resync: check folder status via STATUS before using cache
-            let status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let status = session.status(&folder, "(MESSAGES)")?;
             let exists = status.exists;
             let uidnext = status.uid_next;
 
@@ -414,7 +414,7 @@ impl ImapClient {
             let mut session = Self::connect_sync(&host, port, credentials)?;
 
             // Resync: check folder status via STATUS before using cache
-            let quick_status = session.status(&folder, "(MESSAGES UIDNEXT)")?;
+            let quick_status = session.status(&folder, "(MESSAGES)")?;
             let exists = quick_status.exists;
             let uidnext = quick_status.uid_next;
 

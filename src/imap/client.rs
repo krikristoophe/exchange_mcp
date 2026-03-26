@@ -1430,8 +1430,20 @@ impl ImapClient {
                         }
                     }
                 }
-                // Fallback: create event from email envelope (Exchange items without ICS)
+                // Fallback: create event from email envelope + body text
+                // (Exchange wraps calendar items in "Retrieval failed" error messages)
                 if !found {
+                    let body_text = msg
+                        .body()
+                        .map(|b| {
+                            let raw = String::from_utf8_lossy(b);
+                            // Try to extract text from MIME, fallback to raw
+                            match mailparse::parse_mail(b) {
+                                Ok(parsed) => parsed.get_body().unwrap_or_else(|_| raw.to_string()),
+                                Err(_) => raw.to_string(),
+                            }
+                        })
+                        .unwrap_or_default();
                     if let Some(envelope) = msg.envelope() {
                         let subject = envelope
                             .subject
@@ -1449,11 +1461,9 @@ impl ImapClient {
                             .and_then(|addrs| addrs.first())
                             .map(|addr| parse::format_address(addr))
                             .unwrap_or_default();
-                        if !subject.is_empty() || !date.is_empty() {
-                            events.push(super::calendar::calendar_event_from_envelope(
-                                uid, &subject, &date, &from,
-                            ));
-                        }
+                        events.push(super::calendar::calendar_event_from_envelope(
+                            uid, &subject, &date, &from, &body_text,
+                        ));
                     }
                 }
             }
@@ -1593,8 +1603,18 @@ impl ImapClient {
                         }
                     }
                 }
-                // Fallback: create event from email envelope
+                // Fallback: parse Exchange "Retrieval failed" error body
                 if !found {
+                    let body_text = msg
+                        .body()
+                        .map(|b| {
+                            let raw = String::from_utf8_lossy(b);
+                            match mailparse::parse_mail(b) {
+                                Ok(parsed) => parsed.get_body().unwrap_or_else(|_| raw.to_string()),
+                                Err(_) => raw.to_string(),
+                            }
+                        })
+                        .unwrap_or_default();
                     if let Some(envelope) = msg.envelope() {
                         let subject = envelope
                             .subject
@@ -1612,11 +1632,9 @@ impl ImapClient {
                             .and_then(|addrs| addrs.first())
                             .map(|addr| parse::format_address(addr))
                             .unwrap_or_default();
-                        if !subject.is_empty() || !date.is_empty() {
-                            events.push(super::calendar::calendar_event_from_envelope(
-                                uid, &subject, &date, &from,
-                            ));
-                        }
+                        events.push(super::calendar::calendar_event_from_envelope(
+                            uid, &subject, &date, &from, &body_text,
+                        ));
                     }
                 }
             }

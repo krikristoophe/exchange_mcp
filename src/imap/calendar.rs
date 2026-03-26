@@ -520,12 +520,31 @@ fn find_property_name_part(ics: &str, prop: &str) -> String {
 
 /// Create a basic CalendarEvent from email envelope data when no ICS content is available.
 /// Exchange calendar items accessed via IMAP may not have text/calendar MIME parts.
+/// When Exchange can't convert an item to IMAP format, it generates an error wrapper
+/// containing the original Subject, From, and Sent date in the body text.
 pub fn calendar_event_from_envelope(
     uid: u32,
     subject: &str,
     date: &str,
     from: &str,
+    body_text: &str,
 ) -> CalendarEvent {
+    // Try to parse Exchange IMAP retrieval failure message
+    if let Some(parsed) = parse_exchange_retrieval_error(body_text) {
+        return CalendarEvent {
+            uid,
+            ical_uid: None,
+            subject: parsed.subject,
+            start: parsed.sent_date,
+            end: None,
+            location: None,
+            organizer: Some(parsed.from),
+            status: None,
+            is_recurring: false,
+            all_day: false,
+        };
+    }
+
     CalendarEvent {
         uid,
         ical_uid: None,
@@ -552,6 +571,27 @@ pub fn calendar_event_detail_from_envelope(
     from: &str,
     body_text: &str,
 ) -> CalendarEventDetail {
+    // Try to parse Exchange IMAP retrieval failure message
+    if let Some(parsed) = parse_exchange_retrieval_error(body_text) {
+        return CalendarEventDetail {
+            uid,
+            ical_uid: None,
+            subject: parsed.subject,
+            start: parsed.sent_date,
+            end: None,
+            location: None,
+            organizer: Some(parsed.from),
+            attendees: Vec::new(),
+            description: None,
+            status: None,
+            recurrence: None,
+            categories: Vec::new(),
+            all_day: false,
+            transparency: None,
+            priority: None,
+        };
+    }
+
     CalendarEventDetail {
         uid,
         ical_uid: None,
@@ -579,9 +619,94 @@ pub fn calendar_event_detail_from_envelope(
     }
 }
 
+/// Parsed fields from an Exchange IMAP retrieval failure message.
+struct ExchangeRetrievalError {
+    subject: String,
+    from: String,
+    sent_date: String,
+}
+
+/// Parse an Exchange "Retrieval using the IMAP4 protocol failed" error body.
+///
+/// Exchange generates these wrapper messages for calendar items (IPM.Appointment)
+/// that can't be converted to IMAP format. The body contains:
+///
+/// ```text
+/// Subject: "Event Title"
+/// From: "Name" ("/O=...")
+/// Sent date: 3/24/2026 4:06:30 PM
+/// ```
+fn parse_exchange_retrieval_error(body: &str) -> Option<ExchangeRetrievalError> {
+    if !body.contains("couldn't retrieve") && !body.contains("protocol failed") {
+        return None;
+    }
+
+    let mut subject = None;
+    let mut from = None;
+    let mut sent_date = None;
+
+    for line in body.lines() {
+        let line = line.trim();
+
+        if let Some(rest) = line.strip_prefix("Subject:") {
+            // Extract subject, removing surrounding quotes
+            let rest = rest.trim().trim_matches('"');
+            subject = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("From:") {
+            // Extract name from "Name" ("/O=...") or just "Name"
+            let rest = rest.trim();
+            if let Some(name) = extract_quoted_value(rest) {
+                from = Some(name);
+            } else {
+                from = Some(rest.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("Sent date:") {
+            sent_date = Some(rest.trim().to_string());
+        }
+    }
+
+    let subject = subject?;
+    let from = from.unwrap_or_default();
+    let sent_date = sent_date.unwrap_or_default();
+
+    Some(ExchangeRetrievalError {
+        subject,
+        from,
+        sent_date,
+    })
+}
+
+/// Extract the first quoted value from a string: "value" ... -> value
+fn extract_quoted_value(s: &str) -> Option<String> {
+    let start = s.find('"')? + 1;
+    let end = s[start..].find('"')? + start;
+    Some(s[start..end].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_exchange_retrieval_error() {
+        let body = "The server couldn't retrieve the following message:\r\n\r\nSubject: \"SWAPPY x GAMMA - Presentation\"\r\nFrom: \"Matthieu MOLES - Swappy\" (\"/O=MYORG/OU=EXCHANGE ADMINISTRATIVE GROUP\")\r\nSent date: 3/24/2026 4:06:30 PM\r\n\r\nThe message hasn't been deleted.";
+
+        let parsed = parse_exchange_retrieval_error(body).unwrap();
+        assert_eq!(parsed.subject, "SWAPPY x GAMMA - Presentation");
+        assert_eq!(parsed.from, "Matthieu MOLES - Swappy");
+        assert_eq!(parsed.sent_date, "3/24/2026 4:06:30 PM");
+    }
+
+    #[test]
+    fn test_calendar_event_from_exchange_error() {
+        let body = "The server couldn't retrieve the following message:\r\n\r\nSubject: \"Weekly Meeting\"\r\nFrom: \"Boss\" (\"/O=ORG\")\r\nSent date: 1/15/2024 9:00:00 AM\r\n";
+
+        let event = calendar_event_from_envelope(42, "", "", "", body);
+        assert_eq!(event.uid, 42);
+        assert_eq!(event.subject, "Weekly Meeting");
+        assert_eq!(event.organizer.as_deref(), Some("Boss"));
+        assert_eq!(event.start, "1/15/2024 9:00:00 AM");
+    }
 
     #[test]
     fn test_parse_simple_event() {

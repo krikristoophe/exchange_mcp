@@ -1367,8 +1367,62 @@ impl ImapClient {
 
     // ---- Calendar operations ----
 
-    /// Default calendar folder name for Exchange
-    const DEFAULT_CALENDAR_FOLDER: &'static str = "Calendar";
+    /// Known calendar folder names to try (English and French Exchange).
+    const CALENDAR_FOLDER_CANDIDATES: &'static [&'static str] = &[
+        "Calendar",
+        "Calendrier",
+    ];
+
+    /// Try to find the actual calendar folder name by attempting to select
+    /// each candidate. Returns the first one that succeeds.
+    fn find_calendar_folder(
+        session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>,
+    ) -> Result<String> {
+        for candidate in Self::CALENDAR_FOLDER_CANDIDATES {
+            tracing::debug!("Trying calendar folder: {candidate}");
+            match session.select(candidate) {
+                Ok(mailbox) => {
+                    tracing::info!(
+                        "Found calendar folder: {candidate} ({} messages)",
+                        mailbox.exists
+                    );
+                    return Ok(candidate.to_string());
+                }
+                Err(e) => {
+                    tracing::debug!("Folder {candidate} not available: {e}");
+                }
+            }
+        }
+
+        // Fallback: try to find a folder with calendar-related attributes via LIST
+        tracing::debug!("No known calendar folder found, trying LIST to detect one");
+        if let Ok(mailboxes) = session.list(Some(""), Some("*")) {
+            for mb in mailboxes.iter() {
+                let attrs_str = mb
+                    .attributes()
+                    .iter()
+                    .map(|a| format!("{a:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let name = mb.name();
+                // Check for calendar-related custom attributes or name patterns
+                let attrs_lower = attrs_str.to_lowercase();
+                if attrs_lower.contains("calendar") {
+                    tracing::info!("Found calendar folder via attributes: {name} [{attrs_str}]");
+                    if session.select(name).is_ok() {
+                        return Ok(name.to_string());
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "Calendar folder not found. Tried: {}. \
+             Use the 'folder' parameter to specify the correct calendar folder name. \
+             Use list_folders to see available folders.",
+            Self::CALENDAR_FOLDER_CANDIDATES.join(", ")
+        )
+    }
 
     /// List calendar events from the Calendar folder.
     /// Optionally filter by date range using IMAP SEARCH (SINCE/BEFORE).
@@ -1382,19 +1436,32 @@ impl ImapClient {
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+        let folder = folder.map(|s| s.to_string());
         let limit_val = limit.unwrap_or(50);
         let start_date = start_date.map(|s| s.to_string());
         let end_date = end_date.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
-            session.select(&folder)?;
+
+            // Use explicit folder or auto-detect
+            let folder_name = match folder {
+                Some(f) => {
+                    session.select(&f)?;
+                    f
+                }
+                None => Self::find_calendar_folder(&mut session)?,
+            };
 
             // Build search query for date range
             let search_query = build_calendar_search_query(start_date.as_deref(), end_date.as_deref());
+            tracing::debug!("IMAP calendar search query: {search_query} in folder: {folder_name}");
 
             let uids = session.uid_search(&search_query)?;
+            tracing::info!(
+                "IMAP calendar search returned {} UIDs in folder {folder_name}",
+                uids.len()
+            );
 
             if uids.is_empty() {
                 session.logout()?;
@@ -1486,11 +1553,16 @@ impl ImapClient {
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+        let folder = folder.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
-            session.select(&folder)?;
+
+            // Use explicit folder or auto-detect
+            match &folder {
+                Some(f) => { session.select(f.as_str())?; }
+                None => { Self::find_calendar_folder(&mut session)?; }
+            };
 
             let messages = session.uid_fetch(uid.to_string(), "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
             let msg = messages.iter().next().context("Calendar event not found")?;
@@ -1554,13 +1626,18 @@ impl ImapClient {
         let credentials = self.auth.get_credentials().await?;
         let host = self.host.clone();
         let port = self.port;
-        let folder = folder.unwrap_or(Self::DEFAULT_CALENDAR_FOLDER).to_string();
+        let folder = folder.map(|s| s.to_string());
         let limit_val = limit.unwrap_or(20);
         let query = query.to_string();
 
         tokio::task::spawn_blocking(move || {
             let mut session = Self::connect_sync(&host, port, credentials)?;
-            session.select(&folder)?;
+
+            // Use explicit folder or auto-detect
+            match &folder {
+                Some(f) => { session.select(f.as_str())?; }
+                None => { Self::find_calendar_folder(&mut session)?; }
+            };
 
             // Try TEXT search first, then fallback to SUBJECT+OR search for broader matching
             let escaped_query = query.replace('"', "\\\"");

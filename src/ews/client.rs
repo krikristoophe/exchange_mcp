@@ -1,8 +1,11 @@
 //! EWS HTTP client for calendar operations.
+//! Supports NTLM authentication (required by many Exchange servers like OVH)
+//! with Basic Auth fallback.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::prelude::{BASE64_STANDARD, Engine};
 
 use crate::auth::AuthProvider;
 use crate::imap::calendar::{CalendarEvent, CalendarEventDetail};
@@ -23,6 +26,8 @@ impl EwsClient {
     pub fn new(auth: Arc<dyn AuthProvider>, ews_url: String) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .cookie_store(true)
             .build()
             .expect("Failed to build HTTP client");
 
@@ -42,9 +47,145 @@ impl EwsClient {
         format!("https://{imap_host}/EWS/Exchange.asmx")
     }
 
-    /// Send a SOAP request to EWS and return the response body.
+    /// Send a SOAP request to EWS using NTLM auth, falling back to Basic Auth.
     async fn soap_request(&self, body: &str) -> Result<String> {
+        // Try NTLM first, fall back to Basic Auth
+        match self.soap_request_ntlm(body).await {
+            Ok(text) => Ok(text),
+            Err(ntlm_err) => {
+                tracing::debug!("EWS NTLM auth failed, trying Basic Auth: {ntlm_err}");
+                self.soap_request_basic(body).await.map_err(|basic_err| {
+                    anyhow::anyhow!(
+                        "EWS authentication failed at {}.\n\
+                         NTLM error: {ntlm_err}\n\
+                         Basic Auth error: {basic_err}",
+                        self.ews_url
+                    )
+                })
+            }
+        }
+    }
+
+    /// Send a SOAP request using NTLM 3-step handshake.
+    async fn soap_request_ntlm(&self, body: &str) -> Result<String> {
         let credentials = self.auth.get_credentials().await?;
+
+        // Split username into domain\user if applicable
+        let (domain, username) = parse_ntlm_username(&credentials.username);
+
+        let hostname = hostname();
+
+        // Step 1: NEGOTIATE (Type 1 message)
+        let nego_flags = ntlmclient::Flags::NEGOTIATE_UNICODE
+            | ntlmclient::Flags::REQUEST_TARGET
+            | ntlmclient::Flags::NEGOTIATE_NTLM
+            | ntlmclient::Flags::NEGOTIATE_WORKSTATION_SUPPLIED;
+
+        let nego_msg = ntlmclient::Message::Negotiate(ntlmclient::NegotiateMessage {
+            flags: nego_flags,
+            supplied_domain: String::new(),
+            supplied_workstation: hostname.clone(),
+            os_version: Default::default(),
+        });
+        let nego_bytes = nego_msg.to_bytes().context("Failed to build NTLM negotiate message")?;
+        let nego_b64 = BASE64_STANDARD.encode(&nego_bytes);
+
+        tracing::debug!("EWS NTLM negotiate to: {}", self.ews_url);
+
+        let resp = self
+            .http
+            .post(&self.ews_url)
+            .header("Authorization", format!("NTLM {nego_b64}"))
+            .header("Content-Type", "text/xml; charset=utf-8")
+            .body(body.to_string())
+            .send()
+            .await
+            .context("EWS NTLM negotiate request failed")?;
+
+        // Step 2: Parse CHALLENGE (Type 2 message) from server
+        let challenge_header = resp
+            .headers()
+            .get("www-authenticate")
+            .ok_or_else(|| anyhow::anyhow!("No WWW-Authenticate header in NTLM challenge response"))?
+            .to_str()
+            .context("Invalid WWW-Authenticate header")?;
+
+        let challenge_b64 = challenge_header
+            .strip_prefix("NTLM ")
+            .or_else(|| challenge_header.strip_prefix("ntlm "))
+            .ok_or_else(|| anyhow::anyhow!("WWW-Authenticate is not NTLM: {challenge_header}"))?;
+
+        let challenge_bytes = BASE64_STANDARD
+            .decode(challenge_b64.trim())
+            .context("Failed to decode NTLM challenge")?;
+        let challenge = ntlmclient::Message::try_from(challenge_bytes.as_slice())
+            .context("Failed to parse NTLM challenge message")?;
+
+        let challenge_msg = match challenge {
+            ntlmclient::Message::Challenge(c) => c,
+            _ => anyhow::bail!("Expected NTLM Challenge message, got different type"),
+        };
+
+        // Extract target_info for NTLMv2
+        let target_info_bytes: Vec<u8> = challenge_msg
+            .target_information
+            .iter()
+            .flat_map(|ie| ie.to_bytes())
+            .collect();
+
+        // Step 3: AUTHENTICATE (Type 3 message)
+        let creds = ntlmclient::Credentials {
+            username: username.to_owned(),
+            password: credentials.password.clone(),
+            domain: domain.to_owned(),
+        };
+
+        let challenge_response = ntlmclient::respond_challenge_ntlm_v2(
+            challenge_msg.challenge,
+            &target_info_bytes,
+            ntlmclient::get_ntlm_time(),
+            &creds,
+        );
+
+        let auth_flags = ntlmclient::Flags::NEGOTIATE_UNICODE
+            | ntlmclient::Flags::NEGOTIATE_NTLM;
+
+        let auth_msg = challenge_response.to_message(&creds, &hostname, auth_flags);
+        let auth_bytes = auth_msg
+            .to_bytes()
+            .context("Failed to build NTLM authenticate message")?;
+        let auth_b64 = BASE64_STANDARD.encode(&auth_bytes);
+
+        tracing::debug!("EWS NTLM authenticate to: {}", self.ews_url);
+
+        let response = self
+            .http
+            .post(&self.ews_url)
+            .header("Authorization", format!("NTLM {auth_b64}"))
+            .header("Content-Type", "text/xml; charset=utf-8")
+            .body(body.to_string())
+            .send()
+            .await
+            .context("EWS NTLM authenticate request failed")?;
+
+        let status = response.status();
+        let text = response.text().await.context("Failed to read EWS response")?;
+
+        if !status.is_success() {
+            anyhow::bail!("EWS NTLM request failed with status {status}");
+        }
+
+        validate_soap_response(&text, &self.ews_url)?;
+
+        tracing::debug!("EWS NTLM request succeeded (status {status})");
+        Ok(text)
+    }
+
+    /// Send a SOAP request using Basic Auth (fallback).
+    async fn soap_request_basic(&self, body: &str) -> Result<String> {
+        let credentials = self.auth.get_credentials().await?;
+
+        tracing::debug!("EWS Basic Auth request to: {}", self.ews_url);
 
         let response = self
             .http
@@ -54,18 +195,24 @@ impl EwsClient {
             .body(body.to_string())
             .send()
             .await
-            .context("EWS request failed")?;
+            .context(format!("EWS request to {} failed", self.ews_url))?;
 
         let status = response.status();
         let text = response.text().await.context("Failed to read EWS response")?;
 
         if !status.is_success() {
             if status.as_u16() == 401 {
-                anyhow::bail!("EWS authentication failed (401). Check credentials.");
+                anyhow::bail!(
+                    "EWS Basic Auth failed (401) at {}",
+                    self.ews_url
+                );
             }
-            anyhow::bail!("EWS request failed with status {status}: {text}");
+            anyhow::bail!("EWS request failed with status {status} at {}: {text}", self.ews_url);
         }
 
+        validate_soap_response(&text, &self.ews_url)?;
+
+        tracing::debug!("EWS Basic Auth request succeeded (status {status})");
         Ok(text)
     }
 
@@ -229,9 +376,46 @@ impl EwsClient {
     }
 }
 
+/// Validate that the response is actually SOAP XML.
+fn validate_soap_response(text: &str, ews_url: &str) -> Result<()> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<?xml")
+        && !trimmed.starts_with("<s:Envelope")
+        && !trimmed.starts_with("<soap:Envelope")
+    {
+        tracing::warn!(
+            "EWS response from {} is not SOAP XML (starts with: {:?}...)",
+            ews_url,
+            &trimmed[..trimmed.len().min(100)]
+        );
+        anyhow::bail!(
+            "EWS response is not valid SOAP XML. \
+             The server at {} may require different authentication or EWS may be disabled.",
+            ews_url
+        );
+    }
+    Ok(())
+}
+
+/// Parse NTLM username: "DOMAIN\user" -> ("DOMAIN", "user"), "user@domain" -> ("", "user@domain")
+fn parse_ntlm_username(username: &str) -> (&str, &str) {
+    if let Some(pos) = username.find('\\') {
+        (&username[..pos], &username[pos + 1..])
+    } else {
+        ("", username)
+    }
+}
+
+/// Get the local hostname for NTLM workstation field.
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "WORKSTATION".to_string())
+}
+
 /// Format an EWS ISO 8601 datetime into a more readable format.
-/// Input: "2024-01-15T09:00:00Z" → Output: "2024-01-15 09:00:00 UTC"
-/// Input: "2024-01-15T09:00:00+01:00" → Output: "2024-01-15 09:00:00 (+01:00)"
+/// Input: "2024-01-15T09:00:00Z" -> Output: "2024-01-15 09:00:00 UTC"
+/// Input: "2024-01-15T09:00:00+01:00" -> Output: "2024-01-15 09:00:00 (+01:00)"
 fn format_ews_datetime(dt: &str) -> String {
     if dt.is_empty() {
         return dt.to_string();
@@ -264,7 +448,7 @@ fn normalize_to_iso8601(date: &str) -> String {
     if date.contains('T') {
         return date.to_string();
     }
-    // yyyy-mm-dd → yyyy-mm-ddT00:00:00Z
+    // yyyy-mm-dd -> yyyy-mm-ddT00:00:00Z
     if date.len() == 10 && date.chars().nth(4) == Some('-') {
         return format!("{date}T00:00:00Z");
     }

@@ -766,7 +766,10 @@ impl ExchangeMcpServer {
             )
             .await
         {
-            Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+            Ok(events) => {
+                tracing::info!("EWS list_calendar_events returned {} events", events.len());
+                serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string())
+            }
             Err(ews_err) => {
                 tracing::warn!("EWS list_calendar_events failed, trying IMAP fallback: {ews_err}");
                 match self
@@ -779,8 +782,17 @@ impl ExchangeMcpServer {
                     )
                     .await
                 {
-                    Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
-                    Err(e) => format!("Error listing calendar events: {e} (EWS also failed: {ews_err})"),
+                    Ok(events) => {
+                        tracing::info!("IMAP list_calendar_events returned {} events", events.len());
+                        serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string())
+                    }
+                    Err(e) => format!(
+                        "Error listing calendar events.\n\
+                         IMAP error: {e}\n\
+                         EWS error: {ews_err}\n\n\
+                         Tip: Use list_folders to check available folder names, \
+                         then try again with the 'folder' parameter."
+                    ),
                 }
             }
         }
@@ -821,7 +833,10 @@ impl ExchangeMcpServer {
             .search_calendar_events(params.folder.as_deref(), &params.query, params.limit)
             .await
         {
-            Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+            Ok(events) => {
+                tracing::info!("EWS search_calendar_events returned {} events", events.len());
+                serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string())
+            }
             Err(ews_err) => {
                 tracing::warn!("EWS search_calendar_events failed, trying IMAP fallback: {ews_err}");
                 match self
@@ -829,8 +844,17 @@ impl ExchangeMcpServer {
                     .search_calendar_events(params.folder.as_deref(), &params.query, params.limit)
                     .await
                 {
-                    Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
-                    Err(e) => format!("Error searching calendar events: {e} (EWS also failed: {ews_err})"),
+                    Ok(events) => {
+                        tracing::info!("IMAP search_calendar_events returned {} events", events.len());
+                        serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string())
+                    }
+                    Err(e) => format!(
+                        "Error searching calendar events.\n\
+                         IMAP error: {e}\n\
+                         EWS error: {ews_err}\n\n\
+                         Tip: Use list_folders to check available folder names, \
+                         then try again with the 'folder' parameter."
+                    ),
                 }
             }
         }

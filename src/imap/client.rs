@@ -1412,7 +1412,7 @@ impl ImapClient {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            let messages = session.uid_fetch(&uid_range, "(UID BODY.PEEK[])")?;
+            let messages = session.uid_fetch(&uid_range, "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
 
             let mut events: Vec<super::calendar::CalendarEvent> = Vec::new();
             for msg in messages.iter() {
@@ -1420,10 +1420,39 @@ impl ImapClient {
                     Some(u) => u,
                     None => continue,
                 };
+                // Try to extract ICS data from MIME body
+                let mut found = false;
                 if let Some(body) = msg.body() {
                     if let Some(ics) = super::calendar::extract_ics_from_mime(body) {
                         if let Some(event) = super::calendar::parse_calendar_event(uid, &ics) {
                             events.push(event);
+                            found = true;
+                        }
+                    }
+                }
+                // Fallback: create event from email envelope (Exchange items without ICS)
+                if !found {
+                    if let Some(envelope) = msg.envelope() {
+                        let subject = envelope
+                            .subject
+                            .as_ref()
+                            .map(|s| parse::decode_imap_utf8(s))
+                            .unwrap_or_default();
+                        let date = envelope
+                            .date
+                            .as_ref()
+                            .map(|d| String::from_utf8_lossy(d).to_string())
+                            .unwrap_or_default();
+                        let from = envelope
+                            .from
+                            .as_ref()
+                            .and_then(|addrs| addrs.first())
+                            .map(|addr| parse::format_address(addr))
+                            .unwrap_or_default();
+                        if !subject.is_empty() || !date.is_empty() {
+                            events.push(super::calendar::calendar_event_from_envelope(
+                                uid, &subject, &date, &from,
+                            ));
                         }
                     }
                 }
@@ -1453,14 +1482,51 @@ impl ImapClient {
             let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
-            let messages = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")?;
+            let messages = session.uid_fetch(uid.to_string(), "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
             let msg = messages.iter().next().context("Calendar event not found")?;
 
-            let body = msg.body().context("No message body")?;
-            let ics = super::calendar::extract_ics_from_mime(body)
-                .context("No calendar data found in message")?;
-            let detail = super::calendar::parse_calendar_event_detail(uid, &ics)
-                .context("Failed to parse calendar event")?;
+            // Try ICS extraction first
+            let detail = if let Some(body) = msg.body() {
+                if let Some(ics) = super::calendar::extract_ics_from_mime(body) {
+                    super::calendar::parse_calendar_event_detail(uid, &ics)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Fallback to envelope data if no ICS found
+            let detail = match detail {
+                Some(d) => d,
+                None => {
+                    let envelope = msg.envelope().context("No envelope data")?;
+                    let subject = envelope
+                        .subject
+                        .as_ref()
+                        .map(|s| parse::decode_imap_utf8(s))
+                        .unwrap_or_default();
+                    let date = envelope
+                        .date
+                        .as_ref()
+                        .map(|d| String::from_utf8_lossy(d).to_string())
+                        .unwrap_or_default();
+                    let from = envelope
+                        .from
+                        .as_ref()
+                        .and_then(|addrs| addrs.first())
+                        .map(|addr| parse::format_address(addr))
+                        .unwrap_or_default();
+                    let body_text = msg
+                        .body()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .unwrap_or_default();
+                    let body_text = super::html_to_text(&body_text);
+                    super::calendar::calendar_event_detail_from_envelope(
+                        uid, &subject, &date, &from, &body_text,
+                    )
+                }
+            };
 
             session.logout()?;
             Ok(detail)
@@ -1486,8 +1552,12 @@ impl ImapClient {
             let mut session = Self::connect_sync(&host, port, credentials)?;
             session.select(&folder)?;
 
-            // Use TEXT search to match against the full message content (includes ICS data)
-            let search_query = format!("TEXT \"{}\"", query.replace('"', "\\\""));
+            // Try TEXT search first, then fallback to SUBJECT+OR search for broader matching
+            let escaped_query = query.replace('"', "\\\"");
+            let search_query = format!(
+                "OR TEXT \"{0}\" SUBJECT \"{0}\"",
+                escaped_query
+            );
             let uids = session.uid_search(&search_query)?;
 
             if uids.is_empty() {
@@ -1506,7 +1576,7 @@ impl ImapClient {
                 .collect::<Vec<_>>()
                 .join(",");
 
-            let messages = session.uid_fetch(&uid_range, "(UID BODY.PEEK[])")?;
+            let messages = session.uid_fetch(&uid_range, "(UID FLAGS ENVELOPE BODY.PEEK[])")?;
 
             let mut events: Vec<super::calendar::CalendarEvent> = Vec::new();
             for msg in messages.iter() {
@@ -1514,10 +1584,38 @@ impl ImapClient {
                     Some(u) => u,
                     None => continue,
                 };
+                let mut found = false;
                 if let Some(body) = msg.body() {
                     if let Some(ics) = super::calendar::extract_ics_from_mime(body) {
                         if let Some(event) = super::calendar::parse_calendar_event(uid, &ics) {
                             events.push(event);
+                            found = true;
+                        }
+                    }
+                }
+                // Fallback: create event from email envelope
+                if !found {
+                    if let Some(envelope) = msg.envelope() {
+                        let subject = envelope
+                            .subject
+                            .as_ref()
+                            .map(|s| parse::decode_imap_utf8(s))
+                            .unwrap_or_default();
+                        let date = envelope
+                            .date
+                            .as_ref()
+                            .map(|d| String::from_utf8_lossy(d).to_string())
+                            .unwrap_or_default();
+                        let from = envelope
+                            .from
+                            .as_ref()
+                            .and_then(|addrs| addrs.first())
+                            .map(|addr| parse::format_address(addr))
+                            .unwrap_or_default();
+                        if !subject.is_empty() || !date.is_empty() {
+                            events.push(super::calendar::calendar_event_from_envelope(
+                                uid, &subject, &date, &from,
+                            ));
                         }
                     }
                 }

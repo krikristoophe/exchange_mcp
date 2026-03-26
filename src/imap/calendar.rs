@@ -270,22 +270,75 @@ fn format_ics_datetime(value: &str, name_part: &str) -> (String, bool) {
 }
 
 /// Extract ICS content from a MIME message body.
-/// Looks for text/calendar parts in the MIME structure.
+/// Looks for text/calendar parts in the MIME structure, then falls back to
+/// searching text/plain parts and raw body for embedded ICS data.
 pub fn extract_ics_from_mime(body: &[u8]) -> Option<String> {
     match mailparse::parse_mail(body) {
         Ok(parsed) => {
+            // First try: look for text/calendar or application/ics parts
             let mut ics = None;
             find_calendar_part(&parsed, &mut ics);
-            ics
+            if ics.is_some() {
+                return ics;
+            }
+
+            // Second try: look for ICS content embedded in text/plain parts
+            // (Exchange sometimes stores calendar data in plain text parts)
+            let mut text_content = None;
+            find_text_part_with_ics(&parsed, &mut text_content);
+            if text_content.is_some() {
+                return text_content;
+            }
+
+            // Third try: search raw body for ICS markers
+            let text = String::from_utf8_lossy(body);
+            extract_ics_from_text(&text)
         }
         Err(_) => {
             // Try as raw text
             let text = String::from_utf8_lossy(body);
-            if text.contains("BEGIN:VCALENDAR") || text.contains("BEGIN:VEVENT") {
-                Some(text.to_string())
-            } else {
-                None
+            extract_ics_from_text(&text)
+        }
+    }
+}
+
+/// Extract ICS content from a text string.
+/// Looks for BEGIN:VCALENDAR...END:VCALENDAR or BEGIN:VEVENT...END:VEVENT blocks.
+fn extract_ics_from_text(text: &str) -> Option<String> {
+    // Try to extract a full VCALENDAR block
+    if let Some(start) = text.find("BEGIN:VCALENDAR") {
+        if let Some(end_marker) = text[start..].find("END:VCALENDAR") {
+            let end = start + end_marker + "END:VCALENDAR".len();
+            return Some(text[start..end].to_string());
+        }
+    }
+    // Try to extract just a VEVENT block
+    if let Some(start) = text.find("BEGIN:VEVENT") {
+        if let Some(end_marker) = text[start..].find("END:VEVENT") {
+            let end = start + end_marker + "END:VEVENT".len();
+            return Some(text[start..end].to_string());
+        }
+    }
+    None
+}
+
+/// Search text/plain parts for embedded ICS data.
+fn find_text_part_with_ics(mail: &mailparse::ParsedMail, result: &mut Option<String>) {
+    if result.is_some() {
+        return;
+    }
+    if mail.subparts.is_empty() {
+        let content_type = mail.ctype.mimetype.to_lowercase();
+        if content_type.contains("text/plain") || content_type.contains("text/html") {
+            if let Ok(body) = mail.get_body() {
+                if let Some(ics) = extract_ics_from_text(&body) {
+                    *result = Some(ics);
+                }
             }
+        }
+    } else {
+        for part in &mail.subparts {
+            find_text_part_with_ics(part, result);
         }
     }
 }
@@ -463,6 +516,67 @@ fn find_property_name_part(ics: &str, prop: &str) -> String {
         }
     }
     prop.to_string()
+}
+
+/// Create a basic CalendarEvent from email envelope data when no ICS content is available.
+/// Exchange calendar items accessed via IMAP may not have text/calendar MIME parts.
+pub fn calendar_event_from_envelope(
+    uid: u32,
+    subject: &str,
+    date: &str,
+    from: &str,
+) -> CalendarEvent {
+    CalendarEvent {
+        uid,
+        ical_uid: None,
+        subject: subject.to_string(),
+        start: date.to_string(),
+        end: None,
+        location: None,
+        organizer: if from.is_empty() {
+            None
+        } else {
+            Some(from.to_string())
+        },
+        status: None,
+        is_recurring: false,
+        all_day: false,
+    }
+}
+
+/// Create a basic CalendarEventDetail from email envelope data.
+pub fn calendar_event_detail_from_envelope(
+    uid: u32,
+    subject: &str,
+    date: &str,
+    from: &str,
+    body_text: &str,
+) -> CalendarEventDetail {
+    CalendarEventDetail {
+        uid,
+        ical_uid: None,
+        subject: subject.to_string(),
+        start: date.to_string(),
+        end: None,
+        location: None,
+        organizer: if from.is_empty() {
+            None
+        } else {
+            Some(from.to_string())
+        },
+        attendees: Vec::new(),
+        description: if body_text.is_empty() {
+            None
+        } else {
+            Some(body_text.to_string())
+        },
+        status: None,
+        recurrence: None,
+        categories: Vec::new(),
+        all_day: false,
+        transparency: None,
+        priority: None,
+    }
 }
 
 #[cfg(test)]

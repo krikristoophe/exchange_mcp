@@ -422,12 +422,14 @@ pub async fn authorize_post(
                 password.clone(),
             ));
             let imap_client = Arc::new(ImapClient::new(
-                auth,
+                auth.clone(),
                 imap_host.clone(),
                 imap_port,
                 state.default_smtp_host.clone(),
                 state.default_smtp_port,
             ));
+            let ews_url = crate::ews::EwsClient::ews_url_from_host(&imap_host);
+            let ews_client = Arc::new(crate::ews::EwsClient::new(auth, ews_url));
             let session_token = random_token(32);
 
             state
@@ -437,6 +439,7 @@ pub async fn authorize_post(
                     UserSession {
                         email: email.clone(),
                         imap: imap_client,
+                        ews: ews_client,
                         imap_host: imap_host.clone(),
                         imap_port,
                         last_activity: chrono::Utc::now().timestamp(),

@@ -15,6 +15,7 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::ews::EwsClient;
 use crate::imap::ImapClient;
 
 // UI resource constants
@@ -68,13 +69,15 @@ fn result_with_structured(text: String, structured: Value) -> Result<CallToolRes
 #[derive(Clone)]
 pub struct ExchangeMcpServer {
     imap: Arc<ImapClient>,
+    ews: Arc<EwsClient>,
     tool_router: ToolRouter<Self>,
 }
 
 impl ExchangeMcpServer {
-    pub fn new(imap: Arc<ImapClient>) -> Self {
+    pub fn new(imap: Arc<ImapClient>, ews: Arc<EwsClient>) -> Self {
         Self {
             imap,
+            ews,
             tool_router: Self::tool_router(),
         }
     }
@@ -326,8 +329,8 @@ pub struct ReadCalendarEventParams {
     /// Calendar folder name (default: "Calendar")
     #[serde(default)]
     pub folder: Option<String>,
-    /// UID of the calendar event to read
-    pub uid: u32,
+    /// Event ID to read. Use the ical_uid/item_id returned by list_calendar_events or search_calendar_events.
+    pub event_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -748,12 +751,13 @@ impl ExchangeMcpServer {
     }
 
     #[tool(
-        description = "List calendar events from the Exchange Calendar folder. Optionally filter by date range (start_date/end_date in yyyy-mm-dd format). Returns subject, start/end times, location, organizer, and recurrence info for each event.",
+        description = "List calendar events from the Exchange Calendar. Uses EWS (Exchange Web Services) for reliable access. Optionally filter by date range (start_date/end_date in yyyy-mm-dd format). Returns subject, start/end times, location, organizer, and recurrence info. Use the ical_uid from results to read full event details.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn list_calendar_events(&self, Parameters(params): Parameters<ListCalendarEventsParams>) -> String {
+        // Try EWS first (proper calendar access), fall back to IMAP
         match self
-            .imap
+            .ews
             .list_calendar_events(
                 params.folder.as_deref(),
                 params.start_date.as_deref(),
@@ -763,22 +767,46 @@ impl ExchangeMcpServer {
             .await
         {
             Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error listing calendar events: {e}"),
+            Err(ews_err) => {
+                tracing::warn!("EWS list_calendar_events failed, trying IMAP fallback: {ews_err}");
+                match self
+                    .imap
+                    .list_calendar_events(
+                        params.folder.as_deref(),
+                        params.start_date.as_deref(),
+                        params.end_date.as_deref(),
+                        params.limit,
+                    )
+                    .await
+                {
+                    Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+                    Err(e) => format!("Error listing calendar events: {e} (EWS also failed: {ews_err})"),
+                }
+            }
         }
     }
 
     #[tool(
-        description = "Read the full details of a single calendar event by its UID. Returns subject, start/end times, location, organizer, attendees, description, recurrence rule, categories, and more.",
+        description = "Read the full details of a single calendar event by its event_id (the ical_uid returned by list_calendar_events). Returns subject, start/end times, location, organizer, attendees, description, categories, and more.",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn read_calendar_event(&self, Parameters(params): Parameters<ReadCalendarEventParams>) -> String {
-        match self
-            .imap
-            .read_calendar_event(params.folder.as_deref(), params.uid)
-            .await
-        {
+        // Try EWS first
+        match self.ews.read_calendar_event(&params.event_id).await {
             Ok(detail) => serde_json::to_string_pretty(&detail).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error reading calendar event: {e}"),
+            Err(ews_err) => {
+                tracing::warn!("EWS read_calendar_event failed, trying IMAP fallback: {ews_err}");
+                // IMAP fallback: try to parse event_id as numeric UID
+                match params.event_id.parse::<u32>() {
+                    Ok(uid) => {
+                        match self.imap.read_calendar_event(params.folder.as_deref(), uid).await {
+                            Ok(detail) => serde_json::to_string_pretty(&detail).unwrap_or_else(|e| e.to_string()),
+                            Err(e) => format!("Error reading calendar event: {e}"),
+                        }
+                    }
+                    Err(_) => format!("Error reading calendar event via EWS: {ews_err}"),
+                }
+            }
         }
     }
 
@@ -787,13 +815,24 @@ impl ExchangeMcpServer {
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn search_calendar_events(&self, Parameters(params): Parameters<SearchCalendarEventsParams>) -> String {
+        // Try EWS first, fall back to IMAP
         match self
-            .imap
+            .ews
             .search_calendar_events(params.folder.as_deref(), &params.query, params.limit)
             .await
         {
             Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
-            Err(e) => format!("Error searching calendar events: {e}"),
+            Err(ews_err) => {
+                tracing::warn!("EWS search_calendar_events failed, trying IMAP fallback: {ews_err}");
+                match self
+                    .imap
+                    .search_calendar_events(params.folder.as_deref(), &params.query, params.limit)
+                    .await
+                {
+                    Ok(events) => serde_json::to_string_pretty(&events).unwrap_or_else(|e| e.to_string()),
+                    Err(e) => format!("Error searching calendar events: {e} (EWS also failed: {ews_err})"),
+                }
+            }
         }
     }
 }

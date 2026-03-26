@@ -173,7 +173,7 @@ pub fn parse_email_detail(msg: &imap::types::Fetch) -> Result<EmailDetail> {
     })
 }
 
-fn format_address(addr: &imap_proto::types::Address<'_>) -> String {
+pub(crate) fn format_address(addr: &imap_proto::types::Address<'_>) -> String {
     let name = addr
         .name
         .as_ref()
@@ -208,7 +208,7 @@ fn format_addresses(addrs: Option<&[imap_proto::types::Address<'_>]>) -> String 
         .unwrap_or_default()
 }
 
-fn decode_imap_utf8(data: &[u8]) -> String {
+pub(crate) fn decode_imap_utf8(data: &[u8]) -> String {
     let s = String::from_utf8_lossy(data).to_string();
     if s.contains("=?") {
         decode_rfc2047(&s)

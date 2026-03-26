@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::ews::EwsClient;
 use crate::imap::ImapClient;
 
 /// Session timeout: 7 days of inactivity.
@@ -11,6 +12,7 @@ const SESSION_TIMEOUT_SECS: i64 = 7 * 24 * 3600;
 pub struct UserSession {
     pub email: String,
     pub imap: Arc<ImapClient>,
+    pub ews: Arc<EwsClient>,
     pub imap_host: String,
     pub imap_port: u16,
     /// Timestamp of last activity (epoch seconds).

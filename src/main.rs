@@ -2,6 +2,7 @@ mod auth;
 mod cache;
 mod config;
 mod crypto;
+mod ews;
 mod imap;
 mod middleware;
 mod oauth;
@@ -14,6 +15,7 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{AuthProvider, BasicAuthProvider};
+use crate::ews::EwsClient;
 use crate::imap::ImapClient;
 use crate::middleware::AuthMcpService;
 use crate::oauth::OAuth2State;
@@ -70,17 +72,20 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                 let auth: Arc<dyn AuthProvider> =
                     Arc::new(BasicAuthProvider::new(ps.email.clone(), ps.password));
                 let imap_client = Arc::new(ImapClient::new(
-                    auth,
+                    auth.clone(),
                     ps.imap_host.clone(),
                     ps.imap_port,
                     config.smtp_host.clone(),
                     config.smtp_port,
                 ));
+                let ews_url = EwsClient::ews_url_from_host(&ps.imap_host);
+                let ews_client = Arc::new(EwsClient::new(auth, ews_url));
                 session_store.insert(
                     ps.session_token.clone(),
                     UserSession {
                         email: ps.email.clone(),
                         imap: imap_client,
+                        ews: ews_client,
                         imap_host: ps.imap_host,
                         imap_port: ps.imap_port,
                         last_activity: chrono::Utc::now().timestamp(),
@@ -154,7 +159,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             sessions.touch(&token);
             let guard = sessions.sessions_read();
             match guard.get(&token) {
-                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone())),
+                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone(), session.ews.clone())),
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "Invalid or expired session token.",

@@ -54,6 +54,10 @@ encoding_rs = "0.8"
 # SMTP (email sending)
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 
+# EWS (Exchange Web Services) for calendar
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+
 # Utils
 async-trait = "0.1"
 anyhow = "1"

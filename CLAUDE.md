@@ -26,6 +26,7 @@ Dockerfile              # Multi-stage build (builder + runtime debian-slim)
 docker-compose.yml      # Stack complete avec volume persistant ./data
 .env.example            # Variables d'environnement (a copier en .env)
 src/
+├── attachment_store.rs  # Store tokens temporaires pour telechargement HTTP des pieces jointes
 ├── main.rs             # Point d'entree, demarrage serveur HTTP, tache de nettoyage periodique
 ├── config.rs           # Config JSON/env, constantes DEFAULT_IMAP_*, DEFAULT_SMTP_*
 ├── server.rs           # ExchangeMcpServer + 25 outils MCP + resources UI (MCP Apps)
@@ -64,6 +65,9 @@ Client MCP
       → CURRENT_USER_TOKEN task-local
       → MCP factory lit le task-local → ImapClient de la session
       → ExchangeMcpServer traite la requete
+  → GET /attachments/{token}/{filename} (token temporaire, pas de Bearer)
+      → AttachmentStore verifie le token + expiration
+      → Sert le fichier avec Content-Disposition: attachment
 ```
 
 ## Conventions
@@ -88,6 +92,8 @@ Client MCP
   - Transaction SQLite `IMMEDIATE` pour l'echange d'auth code (anti-replay)
   - Validation email et port IMAP cote serveur
   - Revocation de token via `POST /oauth/revoke` (RFC 7009)
+  - Sanitisation MIME types attachments : allowlist (`image/*`, `application/pdf`, `text/plain`, etc.), fallback `application/octet-stream`
+  - Tokens de telechargement : 256 bits, 24h TTL, endpoint dedie sans OAuth
 
 - **MCP Apps** (SEP-1865) :
   - Les fichiers HTML sont dans `src/ui_resources/` et embarques au compile-time via `include_str!()`
@@ -110,6 +116,8 @@ Client MCP
 - Les outils create_draft, update_draft, send_draft, send_email, reply, forward retournent l'UID du message cree/envoye (JSON avec message + uid + folder)
 - `crypto::init_cipher()` doit etre appele au demarrage avant toute operation sur les sessions
 - Les mots de passe existants en clair sont migres automatiquement (detection via `is_encrypted()`) lors de la lecture
+- Les tokens de telechargement d'attachments sont en memoire uniquement (perdus au restart), TTL 24h, nettoyage toutes les 5 min avec grace period de 5 min
+- Les types MIME des attachments sont sanitises (allowlist) pour prevenir les attaques XSS via Content-Type
 
 ## Variables d'environnement
 

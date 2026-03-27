@@ -421,7 +421,6 @@ fn collect_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<Attac
 
 /// Find the first MIME part whose filename matches (case-insensitive).
 /// Filenames are decoded from RFC 2047 encoding before comparison.
-#[allow(dead_code)]
 pub fn find_attachment_part<'a>(
     mail: &'a mailparse::ParsedMail<'a>,
     target_filename: &str,
@@ -430,7 +429,6 @@ pub fn find_attachment_part<'a>(
     find_part_recursive(mail, &target)
 }
 
-#[allow(dead_code)]
 fn find_part_recursive<'a>(
     mail: &'a mailparse::ParsedMail<'a>,
     target: &str,

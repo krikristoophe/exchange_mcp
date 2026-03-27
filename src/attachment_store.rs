@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use rand::RngCore;
 
 /// Download tokens expire after 24 hours.
-const ATTACHMENT_TOKEN_TTL: Duration = Duration::from_secs(24 * 3600);
+pub const ATTACHMENT_TOKEN_TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// Grace period before deleting files (avoids race with in-flight downloads).
 const CLEANUP_GRACE: Duration = Duration::from_secs(5 * 60);
@@ -28,6 +28,8 @@ pub struct AttachmentMeta {
     pub path: PathBuf,
     pub filename: String,
     pub content_type: String,
+    /// Stored for metadata; Content-Length is derived from actual body at serve time.
+    #[allow(dead_code)]
     pub size: u64,
     pub expires_at: Instant,
 }

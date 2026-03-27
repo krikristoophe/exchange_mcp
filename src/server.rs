@@ -886,15 +886,15 @@ impl ExchangeMcpServer {
     async fn download_attachment(&self, Parameters(params): Parameters<DownloadAttachmentParams>) -> Result<CallToolResult, ErrorData> {
         match self.imap.download_attachment(&params.folder, params.uid, &params.filename).await {
             Ok(result) => {
-                use crate::attachment_store::{AttachmentStore, AttachmentMeta};
-                use std::time::{Duration, Instant};
+                use crate::attachment_store::{AttachmentStore, AttachmentMeta, ATTACHMENT_TOKEN_TTL};
+                use std::time::Instant;
 
                 let meta = AttachmentMeta {
                     path: result.path.clone(),
                     filename: result.filename.clone(),
                     content_type: AttachmentStore::sanitize_content_type(&result.content_type),
                     size: result.size,
-                    expires_at: Instant::now() + Duration::from_secs(24 * 3600),
+                    expires_at: Instant::now() + ATTACHMENT_TOKEN_TTL,
                 };
                 let token = self.attachment_store.insert(meta);
                 let encoded_filename = percent_encoding::utf8_percent_encode(

@@ -430,10 +430,14 @@ pub fn find_attachment_part<'a>(
     find_part_recursive(mail, &target)
 }
 
+#[allow(dead_code)]
 fn find_part_recursive<'a>(
     mail: &'a mailparse::ParsedMail<'a>,
     target: &str,
 ) -> Option<&'a mailparse::ParsedMail<'a>> {
+    // Note: we only inspect leaf parts (no subparts). This matches the behavior of
+    // collect_attachments. A message/rfc822 attachment's outer filename is not matched
+    // because the parser populates subparts for it.
     if mail.subparts.is_empty() {
         let disposition = mail
             .headers
@@ -692,6 +696,8 @@ mod tests {
         let parsed = mailparse::parse_mail(&raw).unwrap();
         let part = find_attachment_part(&parsed, "report.pdf");
         assert!(part.is_some());
+        let part = part.unwrap();
+        assert_eq!(part.ctype.mimetype, "application/octet-stream");
     }
 
     #[test]
@@ -708,5 +714,28 @@ mod tests {
         let parsed = mailparse::parse_mail(&raw).unwrap();
         let part = find_attachment_part(&parsed, "missing.pdf");
         assert!(part.is_none());
+    }
+
+    #[test]
+    fn test_find_attachment_part_rfc2047_filename() {
+        // "report.pdf" encoded as RFC 2047 base64
+        let encoded_filename = "=?utf-8?b?cmVwb3J0LnBkZg==?=";
+        let raw = format!(
+            "From: test@example.com\r\n\
+             To: dest@example.com\r\n\
+             Subject: Test\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"bound\"\r\n\
+             \r\n\
+             --bound\r\n\
+             Content-Type: application/octet-stream; name=\"{encoded_filename}\"\r\n\
+             Content-Disposition: attachment; filename=\"{encoded_filename}\"\r\n\
+             \r\n\
+             data\r\n\
+             --bound--\r\n"
+        ).into_bytes();
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        let part = find_attachment_part(&parsed, "report.pdf");
+        assert!(part.is_some(), "Should find attachment with RFC 2047 encoded filename");
     }
 }

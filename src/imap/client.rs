@@ -12,6 +12,7 @@ pub struct ImapClient {
     smtp_host: String,
     smtp_port: u16,
     cache: Arc<EmailCache>,
+    attachment_dir: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -56,6 +57,14 @@ pub struct AttachmentInfo {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadedAttachment {
+    pub path: std::path::PathBuf,
+    pub filename: String,
+    pub size: u64,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ContactInfo {
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,6 +80,56 @@ pub struct FolderStatus {
     pub recent: u32,
 }
 
+/// Sanitize a filename: keep only the final component, enforce max length.
+fn sanitize_filename(filename: &str) -> anyhow::Result<String> {
+    let name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("invalid filename"))?;
+    if name.len() > 255 {
+        return Err(anyhow::anyhow!("invalid filename"));
+    }
+    Ok(name.to_string())
+}
+
+/// Find an available path in `dir` for `filename`, using O_EXCL for atomicity.
+/// Returns (PathBuf, File) — the caller MUST write content into the returned File handle.
+fn resolve_unique_path(
+    dir: &std::path::Path,
+    filename: &str,
+) -> anyhow::Result<(std::path::PathBuf, std::fs::File)> {
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str());
+
+    for attempt in 0..=100u32 {
+        let candidate = if attempt == 0 {
+            filename.to_string()
+        } else if let Some(e) = ext {
+            format!("{stem}_{attempt}.{e}")
+        } else {
+            format!("{stem}_{attempt}")
+        };
+
+        let candidate_path = dir.join(&candidate);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate_path)
+        {
+            Ok(file) => return Ok((candidate_path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(anyhow::anyhow!("too many conflicts for filename: {filename}"))
+}
+
 impl ImapClient {
     pub fn new(
         auth: Arc<dyn AuthProvider>,
@@ -78,6 +137,7 @@ impl ImapClient {
         port: u16,
         smtp_host: String,
         smtp_port: u16,
+        attachment_dir: std::path::PathBuf,
     ) -> Self {
         Self {
             auth,
@@ -86,6 +146,7 @@ impl ImapClient {
             smtp_host,
             smtp_port,
             cache: Arc::new(EmailCache::new()),
+            attachment_dir,
         }
     }
 
@@ -1751,6 +1812,76 @@ impl ImapClient {
         })
         .await?
     }
+
+    /// Download an attachment from an email and save it to the attachment directory.
+    #[allow(dead_code)]
+    pub async fn download_attachment(
+        &self,
+        folder: &str,
+        uid: u32,
+        filename: &str,
+    ) -> anyhow::Result<DownloadedAttachment> {
+        let safe_filename = sanitize_filename(filename)?;
+
+        let credentials = self.auth.get_credentials().await?;
+        let host = self.host.clone();
+        let port = self.port;
+        let folder = folder.to_string();
+        let attachment_dir = self.attachment_dir.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut session = Self::connect_sync(&host, port, credentials)?;
+            session.select(&folder)?;
+
+            let messages = session.uid_fetch(uid.to_string(), "BODY.PEEK[]")?;
+            let msg = messages.iter().next()
+                .ok_or_else(|| anyhow::anyhow!("Email not found"))?;
+            let body = msg.body()
+                .ok_or_else(|| anyhow::anyhow!("Email has no body"))?;
+
+            let parsed = mailparse::parse_mail(body)
+                .map_err(|e| anyhow::anyhow!("MIME parse error: {e}"))?;
+
+            let part = parse::find_attachment_part(&parsed, &safe_filename)
+                .ok_or_else(|| anyhow::anyhow!("attachment not found: {safe_filename}"))?;
+
+            let content_type = part.ctype.mimetype.clone();
+            let raw = part.get_body_raw()
+                .map_err(|e| anyhow::anyhow!("Failed to extract attachment body: {e}"))?;
+
+            // create_dir_all BEFORE canonicalize (canonicalize fails on non-existent paths)
+            std::fs::create_dir_all(&attachment_dir)?;
+            let canonical_dir = std::fs::canonicalize(&attachment_dir)?;
+
+            let (candidate_path, mut file) = resolve_unique_path(&canonical_dir, &safe_filename)?;
+
+            // Confinement check
+            if !candidate_path.starts_with(&canonical_dir) {
+                return Err(anyhow::anyhow!("invalid filename"));
+            }
+
+            // Write directly into the atomically-created file handle (no TOCTOU)
+            use std::io::Write;
+            file.write_all(&raw)?;
+            drop(file);
+
+            let final_filename = candidate_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&safe_filename)
+                .to_string();
+
+            let _ = session.logout();
+
+            Ok(DownloadedAttachment {
+                path: candidate_path,
+                filename: final_filename,
+                size: raw.len() as u64,
+                content_type,
+            })
+        })
+        .await?
+    }
 }
 
 /// Extract a bare email address from "Name <email@example.com>" or "email@example.com".
@@ -1816,4 +1947,70 @@ fn normalize_imap_date(date: &str) -> String {
 
     // Return as-is if we can't parse it
     date.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn tmp() -> TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn test_sanitize_filename_simple() {
+        assert_eq!(sanitize_filename("report.pdf").unwrap(), "report.pdf");
+    }
+
+    #[test]
+    fn test_sanitize_filename_strips_path() {
+        assert_eq!(sanitize_filename("../../etc/passwd").unwrap(), "passwd");
+    }
+
+    #[test]
+    fn test_sanitize_filename_empty_after_strip() {
+        assert!(sanitize_filename("/").is_err());
+        assert!(sanitize_filename("..").is_err());
+        assert!(sanitize_filename("").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_filename_too_long() {
+        let long = "a".repeat(256);
+        assert!(sanitize_filename(&long).is_err());
+    }
+
+    #[test]
+    fn test_resolve_conflict_no_conflict() {
+        let dir = tmp();
+        let (path, _file) = resolve_unique_path(dir.path(), "file.pdf").unwrap();
+        assert_eq!(path.file_name().unwrap(), "file.pdf");
+    }
+
+    #[test]
+    fn test_resolve_conflict_with_existing() {
+        let dir = tmp();
+        fs::write(dir.path().join("file.pdf"), b"existing").unwrap();
+        let (path, _file) = resolve_unique_path(dir.path(), "file.pdf").unwrap();
+        assert_eq!(path.file_name().unwrap(), "file_1.pdf");
+    }
+
+    #[test]
+    fn test_resolve_conflict_no_extension() {
+        let dir = tmp();
+        fs::write(dir.path().join("notes"), b"existing").unwrap();
+        let (path, _file) = resolve_unique_path(dir.path(), "notes").unwrap();
+        assert_eq!(path.file_name().unwrap(), "notes_1");
+    }
+
+    #[test]
+    fn test_resolve_conflict_multiple() {
+        let dir = tmp();
+        fs::write(dir.path().join("file.pdf"), b"1").unwrap();
+        fs::write(dir.path().join("file_1.pdf"), b"2").unwrap();
+        let (path, _file) = resolve_unique_path(dir.path(), "file.pdf").unwrap();
+        assert_eq!(path.file_name().unwrap(), "file_2.pdf");
+    }
 }

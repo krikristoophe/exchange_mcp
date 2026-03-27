@@ -44,7 +44,7 @@ src/
 └── imap/
     ├── mod.rs          # Re-exports (ImapClient, html_to_text, strip_quoted_replies)
     ├── calendar.rs     # Parsing ICS/iCalendar (RFC 5545) — structures CalendarEvent/CalendarEventDetail, extraction MIME text/calendar
-    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts, calendrier
+    ├── client.rs       # ImapClient — connexion, lecture, recherche batch, flags, cache, envoi SMTP, brouillons (create/update/send/delete), contacts, calendrier, téléchargement pièces jointes (DownloadedAttachment, download_attachment)
     └── parse.rs        # Parsing email (MIME, RFC 2047 multi-charset, HTML-to-text, snippets)
 ```
 
@@ -121,6 +121,7 @@ Voir la section complete dans le README.md. Les plus importantes :
 - `EXCHANGE_MCP_ISSUER` — URL publique du serveur (derriere un proxy)
 - `EXCHANGE_MCP_OAUTH_DB` — chemin de la base SQLite OAuth2
 - `EXCHANGE_MCP_ENCRYPTION_KEY` — cle AES-256 en base64 (optionnel, generee auto si absente)
+- `EXCHANGE_MCP_ATTACHMENT_DIR` — répertoire de stockage des pièces jointes téléchargées (défaut: `./attachments`)
 - `RUST_LOG` — niveau de log
 
 ## Docker

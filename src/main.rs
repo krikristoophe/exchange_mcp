@@ -64,6 +64,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     tracing::info!("Starting MCP Streamable HTTP server on {addr}");
 
     let session_store = Arc::new(SessionStore::new());
+    let attachment_store = Arc::new(attachment_store::AttachmentStore::new());
 
     let issuer = config.issuer_url();
 
@@ -216,6 +217,12 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             axum::routing::post(oauth::endpoints::revoke_token),
         )
         .with_state(oauth2_state)
+        // Attachment download endpoint (token-based, no OAuth required)
+        .route(
+            "/attachments/{token}/{filename}",
+            axum::routing::get(serve_attachment)
+                .with_state(attachment_store.clone()),
+        )
         // Security headers middleware
         .layer(axum::middleware::from_fn(middleware::security_headers))
         // MCP endpoint (with auth middleware)
@@ -228,4 +235,51 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     axum::serve(tcp_listener, router).await?;
 
     Ok(())
+}
+
+/// Serve a previously downloaded attachment via its temporary token.
+async fn serve_attachment(
+    axum::extract::Path((token, filename)): axum::extract::Path<(String, String)>,
+    axum::extract::State(store): axum::extract::State<Arc<attachment_store::AttachmentStore>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::{StatusCode, header};
+
+    let meta = match store.get(&token) {
+        Some(m) => m,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // Filename in URL must match stored filename
+    if meta.filename != filename {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let body = match tokio::fs::read(&meta.path).await {
+        Ok(b) => b,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // RFC 5987 Content-Disposition with UTF-8 filename
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let ascii_fallback: String = meta.filename.chars()
+        .map(|c| if c.is_ascii() && c != '"' { c } else { '_' })
+        .collect();
+    let percent_encoded = utf8_percent_encode(&meta.filename, NON_ALPHANUMERIC);
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback, percent_encoded
+    );
+
+    // Content-Length from actual body (not stored meta, which could be stale)
+    let content_length = body.len().to_string();
+
+    // Note: X-Content-Type-Options: nosniff is already set by the security_headers middleware
+    Ok((
+        [
+            (header::CONTENT_TYPE, meta.content_type.clone()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, content_length),
+        ],
+        body,
+    ))
 }

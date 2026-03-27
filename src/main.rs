@@ -151,6 +151,8 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     // MCP service — the factory reads CURRENT_USER_TOKEN task-local
     // to determine which user's IMAP client to use.
     let sessions_for_mcp = session_store.clone();
+    let attachment_store_for_mcp = attachment_store.clone();
+    let issuer_for_mcp = issuer.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let server_config = StreamableHttpServerConfig::default();
 
@@ -168,7 +170,12 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             sessions.touch(&token);
             let guard = sessions.sessions_read();
             match guard.get(&token) {
-                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone(), session.ews.clone())),
+                Some(session) => Ok(ExchangeMcpServer::new(
+                    session.imap.clone(),
+                    session.ews.clone(),
+                    attachment_store_for_mcp.clone(),
+                    issuer_for_mcp.clone(),
+                )),
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "Invalid or expired session token.",

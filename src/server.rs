@@ -364,6 +364,16 @@ pub struct ForwardParams {
     pub body_html: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DownloadAttachmentParams {
+    /// Folder name (e.g. "INBOX")
+    pub folder: String,
+    /// Email UID (from list_emails or read_email)
+    pub uid: u32,
+    /// Exact attachment filename (from read_email attachments list)
+    pub filename: String,
+}
+
 /// Post-process an email detail according to format and strip_quotes options.
 fn process_email_detail(
     mut email: crate::imap::client::EmailDetail,
@@ -857,6 +867,26 @@ impl ExchangeMcpServer {
                     ),
                 }
             }
+        }
+    }
+
+    #[tool(
+        description = "Download an attachment from an email and save it to the local attachment directory. Use read_email first to get the list of attachment filenames. Returns the local file path, final filename, size in bytes, and content type.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn download_attachment(&self, Parameters(params): Parameters<DownloadAttachmentParams>) -> Result<CallToolResult, ErrorData> {
+        match self.imap.download_attachment(&params.folder, params.uid, &params.filename).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&json!({
+                    "path": result.path.to_string_lossy(),
+                    "filename": result.filename,
+                    "size": result.size,
+                    "content_type": result.content_type,
+                }))
+                .unwrap_or_else(|e| e.to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error downloading attachment: {e}"))])),
         }
     }
 }

@@ -54,6 +54,11 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         StreamableHttpServerConfig,
     };
 
+    // Best-effort: create attachment directory at startup
+    if let Err(e) = std::fs::create_dir_all(&config.attachment_dir) {
+        tracing::warn!("Could not create attachment dir {:?}: {}", config.attachment_dir, e);
+    }
+
     let addr = format!("{}:{}", config.sse_host, config.sse_port);
     tracing::info!("Starting MCP Streamable HTTP server on {addr}");
 

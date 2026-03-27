@@ -128,6 +128,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     {
         let sessions = session_store.clone();
         let store = oauth2_store.clone();
+        let attachments = attachment_store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
@@ -144,6 +145,16 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                 // Clean expired tokens and codes
                 let valid = sessions.session_tokens();
                 let _ = store.cleanup_orphaned_tokens(&valid);
+                // Clean expired attachment download tokens and delete files
+                let expired_paths = attachments.cleanup_expired();
+                if !expired_paths.is_empty() {
+                    tracing::info!("Cleaning up {} expired attachment(s)", expired_paths.len());
+                    for path in expired_paths {
+                        if let Err(e) = tokio::fs::remove_file(&path).await {
+                            tracing::warn!("Failed to delete expired attachment {:?}: {e}", path);
+                        }
+                    }
+                }
             }
         });
     }

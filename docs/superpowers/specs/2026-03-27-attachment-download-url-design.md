@@ -48,7 +48,7 @@ issuer: String
 
 1. Inserts an entry in `AttachmentStore`
 2. Builds URL: `{issuer}/attachments/{token}/{filename}`
-3. Returns JSON with existing fields (`path`, `filename`, `size`, `content_type`) plus new field `download_url`
+3. Returns JSON with `download_url`, `filename`, `size`, `content_type` (the local `path` is omitted since it's useless to a remote user)
 
 ### New endpoint: `GET /attachments/:token/:filename`
 
@@ -99,7 +99,7 @@ The factory closure (which creates `ExchangeMcpServer` per request) must capture
 MCP Client → download_attachment(folder, uid, filename)
   → ImapClient fetches email, extracts attachment, saves to disk
   → AttachmentStore.insert(meta) → token
-  → Returns { path, filename, size, content_type, download_url }
+  → Returns { download_url, filename, size, content_type }
 
 User → GET /attachments/{token}/{filename}
   → AttachmentStore.get(token) → meta

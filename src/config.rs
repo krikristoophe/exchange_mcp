@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const DEFAULT_IMAP_HOST: &str = "outlook.office365.com";
+pub const DEFAULT_ATTACHMENT_DIR: &str = "./attachments";
 pub const DEFAULT_IMAP_PORT: u16 = 993;
 pub const DEFAULT_SMTP_HOST: &str = "smtp.office365.com";
 pub const DEFAULT_SMTP_PORT: u16 = 587;
@@ -26,6 +27,9 @@ pub struct Config {
     /// HTTP server port
     #[serde(default = "default_sse_port")]
     pub sse_port: u16,
+    /// Directory where downloaded attachments are stored
+    #[serde(default = "default_attachment_dir")]
+    pub attachment_dir: PathBuf,
 }
 
 fn default_imap_host() -> String {
@@ -50,6 +54,10 @@ fn default_sse_host() -> String {
 
 fn default_sse_port() -> u16 {
     3000
+}
+
+fn default_attachment_dir() -> PathBuf {
+    PathBuf::from(DEFAULT_ATTACHMENT_DIR)
 }
 
 impl Config {
@@ -97,6 +105,9 @@ impl Config {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or_else(default_sse_port),
+            attachment_dir: std::env::var("EXCHANGE_MCP_ATTACHMENT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| default_attachment_dir()),
         })
     }
 
@@ -138,5 +149,33 @@ impl Config {
                 self.sse_port = p;
             }
         }
+        if let Ok(v) = std::env::var("EXCHANGE_MCP_ATTACHMENT_DIR") {
+            self.attachment_dir = PathBuf::from(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_attachment_dir_default() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("EXCHANGE_MCP_ATTACHMENT_DIR");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.attachment_dir, std::path::PathBuf::from("./attachments"));
+    }
+
+    #[test]
+    fn test_attachment_dir_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("EXCHANGE_MCP_ATTACHMENT_DIR", "/tmp/my-attachments");
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.attachment_dir, std::path::PathBuf::from("/tmp/my-attachments"));
+        std::env::remove_var("EXCHANGE_MCP_ATTACHMENT_DIR");
     }
 }

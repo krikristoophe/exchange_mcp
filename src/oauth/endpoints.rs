@@ -427,6 +427,7 @@ pub async fn authorize_post(
                 imap_port,
                 state.default_smtp_host.clone(),
                 state.default_smtp_port,
+                state.attachment_dir.clone(),
             ));
             let ews_url = crate::ews::EwsClient::ews_url_from_host(&imap_host);
             let ews_client = Arc::new(crate::ews::EwsClient::new(auth, ews_url));

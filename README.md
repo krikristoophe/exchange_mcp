@@ -48,6 +48,7 @@ Serveur MCP (Model Context Protocol) pour acceder aux emails via IMAP. Deploieme
 | `reply_email` | Repondre a un email (avec citation, retourne l'UID dans Sent Items) |
 | `forward_email` | Transferer un email (retourne l'UID dans Sent Items) |
 | `list_contacts` | Lister les contacts extraits des emails recents |
+| `download_attachment` | Télécharger une pièce jointe et retourner une URL de téléchargement temporaire (valide 24h) |
 
 ## Installation
 
@@ -158,6 +159,7 @@ Le serveur expose :
 | `POST /oauth/token` | Endpoint de token (echange de code + refresh) |
 | `POST /oauth/revoke` | Revocation de token (RFC 7009) |
 | `/mcp` | Endpoint MCP (`Authorization: Bearer <token>` requis) |
+| `GET /attachments/{token}/{filename}` | Téléchargement de pièce jointe via token temporaire (24h, sans authentification) |
 
 ## Flow OAuth 2.1
 
@@ -397,6 +399,27 @@ Lister les contacts extraits des en-tetes (From, To, Cc) des emails recents. Les
 | `scan_limit` | entier | non | 100 | Nombre d'emails recents a scanner par dossier |
 
 **Retour :** liste de `{ email, name?, frequency }`
+
+### download_attachment
+
+Télécharger une pièce jointe depuis un email et générer une URL de téléchargement temporaire.
+
+| Parametre | Type | Requis | Description |
+|-----------|------|--------|-------------|
+| `folder` | string | oui | Dossier contenant l'email |
+| `uid` | entier | oui | UID de l'email |
+| `attachment_index` | entier | oui | Index de la pièce jointe (0-based, depuis `attachments` dans `read_email`) |
+
+**Retour :** `{ message, filename, size, mime_type, download_url }`
+
+Le champ `download_url` est une URL temporaire valide 24h, accessible sans authentification. Elle peut être utilisée directement dans un navigateur, avec `wget` ou `curl` :
+
+```bash
+wget "<download_url>"
+curl -O -J "<download_url>"
+```
+
+> **Note :** Les tokens de téléchargement sont stockés en mémoire uniquement — ils sont perdus au redémarrage du serveur. Le type MIME est sanitisé (allowlist) pour prévenir les attaques XSS.
 
 ## MCP Apps (interfaces interactives)
 

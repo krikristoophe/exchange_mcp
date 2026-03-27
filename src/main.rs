@@ -1,3 +1,4 @@
+mod attachment_store;
 mod auth;
 mod cache;
 mod config;
@@ -54,10 +55,16 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         StreamableHttpServerConfig,
     };
 
+    // Best-effort: create attachment directory at startup
+    if let Err(e) = std::fs::create_dir_all(&config.attachment_dir) {
+        tracing::warn!("Could not create attachment dir {:?}: {}", config.attachment_dir, e);
+    }
+
     let addr = format!("{}:{}", config.sse_host, config.sse_port);
     tracing::info!("Starting MCP Streamable HTTP server on {addr}");
 
     let session_store = Arc::new(SessionStore::new());
+    let attachment_store = Arc::new(attachment_store::AttachmentStore::new());
 
     let issuer = config.issuer_url();
 
@@ -77,6 +84,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                     ps.imap_port,
                     config.smtp_host.clone(),
                     config.smtp_port,
+                    config.attachment_dir.clone(),
                 ));
                 let ews_url = EwsClient::ews_url_from_host(&ps.imap_host);
                 let ews_client = Arc::new(EwsClient::new(auth, ews_url));
@@ -113,12 +121,14 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         default_imap_port: config.imap_port,
         default_smtp_host: config.smtp_host.clone(),
         default_smtp_port: config.smtp_port,
+        attachment_dir: config.attachment_dir.clone(),
     });
 
     // Periodic cleanup task — runs every 5 minutes
     {
         let sessions = session_store.clone();
         let store = oauth2_store.clone();
+        let attachments = attachment_store.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
@@ -135,6 +145,16 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                 // Clean expired tokens and codes
                 let valid = sessions.session_tokens();
                 let _ = store.cleanup_orphaned_tokens(&valid);
+                // Clean expired attachment download tokens and delete files
+                let expired_paths = attachments.cleanup_expired();
+                if !expired_paths.is_empty() {
+                    tracing::info!("Cleaning up {} expired attachment(s)", expired_paths.len());
+                    for path in expired_paths {
+                        if let Err(e) = tokio::fs::remove_file(&path).await {
+                            tracing::warn!("Failed to delete expired attachment {:?}: {e}", path);
+                        }
+                    }
+                }
             }
         });
     }
@@ -142,6 +162,8 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     // MCP service — the factory reads CURRENT_USER_TOKEN task-local
     // to determine which user's IMAP client to use.
     let sessions_for_mcp = session_store.clone();
+    let attachment_store_for_mcp = attachment_store.clone();
+    let issuer_for_mcp = issuer.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let server_config = StreamableHttpServerConfig::default();
 
@@ -159,7 +181,12 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             sessions.touch(&token);
             let guard = sessions.sessions_read();
             match guard.get(&token) {
-                Some(session) => Ok(ExchangeMcpServer::new(session.imap.clone(), session.ews.clone())),
+                Some(session) => Ok(ExchangeMcpServer::new(
+                    session.imap.clone(),
+                    session.ews.clone(),
+                    attachment_store_for_mcp.clone(),
+                    issuer_for_mcp.clone(),
+                )),
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "Invalid or expired session token.",
@@ -208,6 +235,12 @@ async fn start_http_server(config: config::Config) -> Result<()> {
             axum::routing::post(oauth::endpoints::revoke_token),
         )
         .with_state(oauth2_state)
+        // Attachment download endpoint (token-based, no OAuth required)
+        .route(
+            "/attachments/{token}/{filename}",
+            axum::routing::get(serve_attachment)
+                .with_state(attachment_store.clone()),
+        )
         // Security headers middleware
         .layer(axum::middleware::from_fn(middleware::security_headers))
         // MCP endpoint (with auth middleware)
@@ -220,4 +253,51 @@ async fn start_http_server(config: config::Config) -> Result<()> {
     axum::serve(tcp_listener, router).await?;
 
     Ok(())
+}
+
+/// Serve a previously downloaded attachment via its temporary token.
+async fn serve_attachment(
+    axum::extract::Path((token, filename)): axum::extract::Path<(String, String)>,
+    axum::extract::State(store): axum::extract::State<Arc<attachment_store::AttachmentStore>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::{StatusCode, header};
+
+    let meta = match store.get(&token) {
+        Some(m) => m,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // Filename in URL must match stored filename
+    if meta.filename != filename {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let body = match tokio::fs::read(&meta.path).await {
+        Ok(b) => b,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+
+    // RFC 5987 Content-Disposition with UTF-8 filename
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let ascii_fallback: String = meta.filename.chars()
+        .map(|c| if c.is_ascii() && c != '"' { c } else { '_' })
+        .collect();
+    let percent_encoded = utf8_percent_encode(&meta.filename, NON_ALPHANUMERIC);
+    let disposition = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback, percent_encoded
+    );
+
+    // Content-Length from actual body (not stored meta, which could be stale)
+    let content_length = body.len().to_string();
+
+    // Note: X-Content-Type-Options: nosniff is already set by the security_headers middleware
+    Ok((
+        [
+            (header::CONTENT_TYPE, meta.content_type.clone()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CONTENT_LENGTH, content_length),
+        ],
+        body,
+    ))
 }

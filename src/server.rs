@@ -70,14 +70,23 @@ fn result_with_structured(text: String, structured: Value) -> Result<CallToolRes
 pub struct ExchangeMcpServer {
     imap: Arc<ImapClient>,
     ews: Arc<EwsClient>,
+    attachment_store: Arc<crate::attachment_store::AttachmentStore>,
+    issuer: String,
     tool_router: ToolRouter<Self>,
 }
 
 impl ExchangeMcpServer {
-    pub fn new(imap: Arc<ImapClient>, ews: Arc<EwsClient>) -> Self {
+    pub fn new(
+        imap: Arc<ImapClient>,
+        ews: Arc<EwsClient>,
+        attachment_store: Arc<crate::attachment_store::AttachmentStore>,
+        issuer: String,
+    ) -> Self {
         Self {
             imap,
             ews,
+            attachment_store,
+            issuer,
             tool_router: Self::tool_router(),
         }
     }
@@ -362,6 +371,16 @@ pub struct ForwardParams {
     /// Additional message in HTML format to include before the forwarded content (optional). When provided, the forward is sent as multipart/alternative with both plain text and HTML parts.
     #[serde(default)]
     pub body_html: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DownloadAttachmentParams {
+    /// Folder name (e.g. "INBOX")
+    pub folder: String,
+    /// Email UID (from list_emails or read_email)
+    pub uid: u32,
+    /// Exact attachment filename (from read_email attachments list)
+    pub filename: String,
 }
 
 /// Post-process an email detail according to format and strip_quotes options.
@@ -857,6 +876,46 @@ impl ExchangeMcpServer {
                     ),
                 }
             }
+        }
+    }
+
+    #[tool(
+        description = "Download an attachment from an email. Returns a temporary download URL (valid 24h) that can be opened in a browser or used with wget/curl. Use read_email first to get the list of attachment filenames.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn download_attachment(&self, Parameters(params): Parameters<DownloadAttachmentParams>) -> Result<CallToolResult, ErrorData> {
+        match self.imap.download_attachment(&params.folder, params.uid, &params.filename).await {
+            Ok(result) => {
+                use crate::attachment_store::{AttachmentStore, AttachmentMeta, ATTACHMENT_TOKEN_TTL};
+                use std::time::Instant;
+
+                let meta = AttachmentMeta {
+                    path: result.path.clone(),
+                    filename: result.filename.clone(),
+                    content_type: AttachmentStore::sanitize_content_type(&result.content_type),
+                    size: result.size,
+                    expires_at: Instant::now() + ATTACHMENT_TOKEN_TTL,
+                };
+                let token = self.attachment_store.insert(meta);
+                let encoded_filename = percent_encoding::utf8_percent_encode(
+                    &result.filename,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
+                let download_url = format!(
+                    "{}/attachments/{}/{}",
+                    self.issuer, token, encoded_filename
+                );
+
+                let text = serde_json::to_string_pretty(&json!({
+                    "download_url": download_url,
+                    "filename": result.filename,
+                    "size": result.size,
+                    "content_type": result.content_type,
+                }))
+                .unwrap_or_else(|e| e.to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!("Error downloading attachment: {e}"))])),
         }
     }
 }

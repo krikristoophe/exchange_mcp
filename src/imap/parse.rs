@@ -419,6 +419,55 @@ fn collect_attachments(mail: &mailparse::ParsedMail, attachments: &mut Vec<Attac
     }
 }
 
+/// Find the first MIME part whose filename matches (case-insensitive).
+/// Filenames are decoded from RFC 2047 encoding before comparison.
+pub fn find_attachment_part<'a>(
+    mail: &'a mailparse::ParsedMail<'a>,
+    target_filename: &str,
+) -> Option<&'a mailparse::ParsedMail<'a>> {
+    let target = target_filename.to_lowercase();
+    find_part_recursive(mail, &target)
+}
+
+fn find_part_recursive<'a>(
+    mail: &'a mailparse::ParsedMail<'a>,
+    target: &str,
+) -> Option<&'a mailparse::ParsedMail<'a>> {
+    // Note: we only inspect leaf parts (no subparts). This matches the behavior of
+    // collect_attachments. A message/rfc822 attachment's outer filename is not matched
+    // because the parser populates subparts for it.
+    if mail.subparts.is_empty() {
+        let disposition = mail
+            .headers
+            .iter()
+            .find(|h| h.get_key().eq_ignore_ascii_case("content-disposition"))
+            .map(|h| h.get_value())
+            .unwrap_or_default();
+
+        let raw_name = mail
+            .ctype
+            .params
+            .get("name")
+            .cloned()
+            .or_else(|| extract_disposition_filename(&disposition));
+
+        if let Some(raw) = raw_name {
+            let decoded = decode_rfc2047_public(&raw);
+            if decoded.to_lowercase() == target {
+                return Some(mail);
+            }
+        }
+        None
+    } else {
+        for part in &mail.subparts {
+            if let Some(found) = find_part_recursive(part, target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+}
+
 fn extract_disposition_filename(disposition: &str) -> Option<String> {
     // Parse "attachment; filename=\"file.pdf\""
     for part in disposition.split(';') {
@@ -608,4 +657,83 @@ pub fn html_to_text(html: &str) -> String {
     }
 
     cleaned.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Email MIME minimal avec une piece jointe text/plain nommee "hello.txt"
+    fn make_email_with_attachment(filename: &str, content: &str) -> Vec<u8> {
+        format!(
+            "From: test@example.com\r\n\
+             To: dest@example.com\r\n\
+             Subject: Test\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"bound\"\r\n\
+             \r\n\
+             --bound\r\n\
+             Content-Type: text/plain\r\n\
+             \r\n\
+             Body text\r\n\
+             --bound\r\n\
+             Content-Type: application/octet-stream; name=\"{filename}\"\r\n\
+             Content-Disposition: attachment; filename=\"{filename}\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {}\r\n\
+             --bound--\r\n",
+            base64::engine::general_purpose::STANDARD.encode(content.as_bytes())
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn test_find_attachment_part_found() {
+        let raw = make_email_with_attachment("report.pdf", "PDF content");
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        let part = find_attachment_part(&parsed, "report.pdf");
+        assert!(part.is_some());
+        let part = part.unwrap();
+        assert_eq!(part.ctype.mimetype, "application/octet-stream");
+    }
+
+    #[test]
+    fn test_find_attachment_part_case_insensitive() {
+        let raw = make_email_with_attachment("Report.PDF", "PDF content");
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        let part = find_attachment_part(&parsed, "report.pdf");
+        assert!(part.is_some());
+    }
+
+    #[test]
+    fn test_find_attachment_part_not_found() {
+        let raw = make_email_with_attachment("other.pdf", "PDF content");
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        let part = find_attachment_part(&parsed, "missing.pdf");
+        assert!(part.is_none());
+    }
+
+    #[test]
+    fn test_find_attachment_part_rfc2047_filename() {
+        // "report.pdf" encoded as RFC 2047 base64
+        let encoded_filename = "=?utf-8?b?cmVwb3J0LnBkZg==?=";
+        let raw = format!(
+            "From: test@example.com\r\n\
+             To: dest@example.com\r\n\
+             Subject: Test\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"bound\"\r\n\
+             \r\n\
+             --bound\r\n\
+             Content-Type: application/octet-stream; name=\"{encoded_filename}\"\r\n\
+             Content-Disposition: attachment; filename=\"{encoded_filename}\"\r\n\
+             \r\n\
+             data\r\n\
+             --bound--\r\n"
+        ).into_bytes();
+        let parsed = mailparse::parse_mail(&raw).unwrap();
+        let part = find_attachment_part(&parsed, "report.pdf");
+        assert!(part.is_some(), "Should find attachment with RFC 2047 encoded filename");
+    }
 }

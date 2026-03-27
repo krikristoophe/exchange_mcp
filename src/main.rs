@@ -77,6 +77,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
                     ps.imap_port,
                     config.smtp_host.clone(),
                     config.smtp_port,
+                    config.attachment_dir.clone(),
                 ));
                 let ews_url = EwsClient::ews_url_from_host(&ps.imap_host);
                 let ews_client = Arc::new(EwsClient::new(auth, ews_url));
@@ -113,6 +114,7 @@ async fn start_http_server(config: config::Config) -> Result<()> {
         default_imap_port: config.imap_port,
         default_smtp_host: config.smtp_host.clone(),
         default_smtp_port: config.smtp_port,
+        attachment_dir: config.attachment_dir.clone(),
     });
 
     // Periodic cleanup task — runs every 5 minutes

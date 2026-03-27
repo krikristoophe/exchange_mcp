@@ -19,4 +19,6 @@ pub struct OAuth2State {
     pub default_smtp_host: String,
     /// Default SMTP port from config.
     pub default_smtp_port: u16,
+    /// Directory for storing downloaded attachments.
+    pub attachment_dir: std::path::PathBuf,
 }

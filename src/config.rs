@@ -29,7 +29,7 @@ pub struct Config {
     pub sse_port: u16,
     /// Directory where downloaded attachments are stored
     #[serde(default = "default_attachment_dir")]
-    pub attachment_dir: std::path::PathBuf,
+    pub attachment_dir: PathBuf,
 }
 
 fn default_imap_host() -> String {
@@ -56,8 +56,8 @@ fn default_sse_port() -> u16 {
     3000
 }
 
-fn default_attachment_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(DEFAULT_ATTACHMENT_DIR)
+fn default_attachment_dir() -> PathBuf {
+    PathBuf::from(DEFAULT_ATTACHMENT_DIR)
 }
 
 impl Config {
@@ -85,7 +85,7 @@ impl Config {
         }
     }
 
-    pub fn from_env() -> anyhow::Result<Self> {
+    fn from_env() -> anyhow::Result<Self> {
         Ok(Config {
             imap_host: std::env::var("EXCHANGE_IMAP_HOST")
                 .unwrap_or_else(|_| default_imap_host()),
@@ -106,7 +106,7 @@ impl Config {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or_else(default_sse_port),
             attachment_dir: std::env::var("EXCHANGE_MCP_ATTACHMENT_DIR")
-                .map(std::path::PathBuf::from)
+                .map(PathBuf::from)
                 .unwrap_or_else(|_| default_attachment_dir()),
         })
     }
@@ -124,7 +124,7 @@ impl Config {
         format!("http://{}:{}", host, self.sse_port)
     }
 
-    pub fn apply_env_overrides(&mut self) {
+    fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("EXCHANGE_IMAP_HOST") {
             self.imap_host = v;
         }
@@ -150,7 +150,7 @@ impl Config {
             }
         }
         if let Ok(v) = std::env::var("EXCHANGE_MCP_ATTACHMENT_DIR") {
-            self.attachment_dir = std::path::PathBuf::from(v);
+            self.attachment_dir = PathBuf::from(v);
         }
     }
 }

@@ -1,3 +1,4 @@
+mod attachment_store;
 mod auth;
 mod cache;
 mod config;
